@@ -1,0 +1,80 @@
+# ──────────────────────────────────────────────────────────────────────────
+# ICICLE .dockerignore template (adapted from icicle-ai/cicd-templates)
+#
+# NOTE: the upstream template excludes data/ and *.csv wholesale, meant for
+# services where that's throwaway notebook/analysis data. For us it isn't:
+# data/block_lookup/*.csv is the architecture-search lookup table the app
+# reads at request time, and data/toy_dataset/ is the bundled demo dataset.
+# Both are small, static, and part of the app itself, so they're kept in.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Environments & secrets — NEVER bake these into images
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+.secrets/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# CI / local tooling output
+.github/
+dist/
+build/
+*.log
+logs/
+
+# Docker itself — don't recurse
+Dockerfile
+.dockerignore
+
+# Documentation (usually not needed in image)
+docs/
+*.md
+!README.md
+
+# Web service runtime data — populated at runtime, not needed in the image
+src/web/fnas_lcd.db
+src/web/storage/uploads/*
+src/web/storage/checkpoints/*
+src/web/storage/models/*
+
+# Notebooks — not part of the running service
+*.ipynb
+.ipynb_checkpoints/

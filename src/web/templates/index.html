@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — FNAS-LCD{% endblock %}
+
+{% set status_labels = {
+    'pending': 'pending',
+    'searching': 'searching',
+    'training': 'training',
+    'exporting': 'exporting',
+    'completed': 'available for download',
+    'failed': 'failed',
+    'cancelled': 'cancelled',
+} %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if submitted %}
+<div class="alert alert-success">
+    Submitted job #{{ submitted }}. <a href="/jobs/{{ submitted }}">View status</a>
+</div>
+{% endif %}
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-number">{{ dataset_count }}</div>
+        <div class="stat-label">Datasets</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.total }}</div>
+        <div class="stat-label">Total Jobs</div>
+    </div>
+    <div class="stat-card stat-green">
+        <div class="stat-number">{{ stats.completed }}</div>
+        <div class="stat-label">Completed</div>
+    </div>
+    <div class="stat-card stat-blue">
+        <div class="stat-number">{{ stats.running }}</div>
+        <div class="stat-label">Running</div>
+    </div>
+    <div class="stat-card stat-red">
+        <div class="stat-number">{{ stats.failed }}</div>
+        <div class="stat-label">Failed</div>
+    </div>
+</div>
+
+<div class="actions">
+    <a href="/search" class="btn btn-primary">New Search</a>
+    <a href="/datasets/upload" class="btn btn-secondary">Upload Dataset</a>
+</div>
+
+<h2>Recent Jobs</h2>
+{% if recent_jobs %}
+<table class="table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Dataset</th>
+            <th>Status</th>
+            <th>Device</th>
+            <th>Budget</th>
+            <th>Accuracy</th>
+            <th>Created</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for job in recent_jobs %}
+    <tr>
+        <td>#{{ job.id }}</td>
+        <td><a href="/datasets/{{ job.dataset_id }}">{{ job.dataset_name or ('#' ~ job.dataset_id) }}</a></td>
+        <td><span class="badge badge-{{ job.status }}">{{ status_labels.get(job.status, job.status) }}</span></td>
+        <td>{{ job.device_type }}</td>
+        <td>{{ "%.1f"|format(job.budget) }}</td>
+        <td>{{ "%.2f%%"|format(job.best_val_acc) if job.best_val_acc else "—" }}</td>
+        <td>{{ job.created_at[:16] if job.created_at else "" }}</td>
+        <td><a href="/jobs/{{ job.id }}">View</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No jobs yet. <a href="/search">Start a search</a> to create one.</p>
+{% endif %}
+
+{% if has_active %}
+<script>
+(function poll() {
+    const initialStatuses = {{ recent_jobs | map(attribute='status') | list | tojson }};
+    fetch('/api/jobs?limit=10')
+        .then(r => r.json())
+        .then(data => {
+            const newStatuses = data.jobs.map(j => j.status);
+            if (JSON.stringify(newStatuses) !== JSON.stringify(initialStatuses)) {
+                location.reload();
+                return;
+            }
+            setTimeout(poll, 1000);
+        })
+        .catch(() => setTimeout(poll, 1000));
+})();
+</script>
+{% endif %}
+{% endblock %}

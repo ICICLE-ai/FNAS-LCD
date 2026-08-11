@@ -1,0 +1,42 @@
+schema-version: 1
+
+# ──────────────────────────────────────────────────────────────────────
+# Service Identity
+# ──────────────────────────────────────────────────────────────────────
+
+service-name: fnas-lcd
+service-version: 0.1.0
+
+# TODO 
+project-name: fnas-lcd
+
+# TODO
+service-type: ai
+
+# TODO
+pod-name: fnas-lcd-prod
+
+# ──────────────────────────────────────────────────────────────────────
+# Runtime Configuration
+# ──────────────────────────────────────────────────────────────────────
+
+runtime-type: python
+
+# Matches pyproject.toml's requires-python and what we've tested against.
+runtime-version: "3.13"
+
+# ──────────────────────────────────────────────────────────────────────
+# System Packages
+# ──────────────────────────────────────────────────────────────────────
+
+# torch/torchvision/numpy ship prebuilt wheels for our target platforms,
+# so no compiler toolchain is needed at build time.
+build-apt-packages: []
+
+# ca-certificates for outbound HTTPS (e.g. talking to Postgres/object
+# storage/Tapis over TLS). libgomp1 is required by torch's OpenMP-based
+# CPU kernels — confirmed needed via a local container build (python:3.13
+# slim base doesn't ship it).
+runtime-apt-packages:
+  - ca-certificates
+  - libgomp1

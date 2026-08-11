@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Job #{{ job.id }} — FNAS-LCD{% endblock %}
+
+{% block head %}
+<style>
+#live-status { padding: 8px 16px; border-radius: 4px; font-weight: bold; }
+.progress-steps { display: flex; gap: 8px; margin: 16px 0; }
+.progress-step { flex: 1; text-align: center; padding: 10px; border-radius: 4px;
+    background: var(--bg-secondary, #eee); font-size: 0.85em; }
+.progress-step.active { background: #3b82f6; color: white; }
+.progress-step.done { background: #22c55e; color: white; }
+.progress-step.fail { background: #ef4444; color: white; }
+</style>
+{% endblock %}
+
+{% set status_labels = {
+    'pending': 'pending',
+    'searching': 'searching',
+    'training': 'training',
+    'exporting': 'exporting',
+    'completed': 'available for download',
+    'failed': 'failed',
+    'cancelled': 'cancelled',
+} %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Job #{{ job.id }}</h1>
+    <div id="live-status">
+        <span class="badge badge-{{ job.status }}">{{ status_labels.get(job.status, job.status) }}</span>
+    </div>
+</div>
+
+{% if job.status in ('completed', 'training', 'exporting') or (job.structure_str) %}
+<div class="progress-steps" id="progress-steps">
+    {% set steps = ['pending', 'searching', 'training', 'exporting', 'completed'] %}
+    {% set job_idx = steps.index(job.status) if job.status in steps else -1 %}
+    {% for s in steps %}
+    <div class="progress-step {% if loop.index0 <= job_idx and job.status == 'completed' %}done{% elif loop.index0 == job_idx %}active{% elif loop.index0 < job_idx %}done{% endif %}">
+        {{ status_labels.get(s, s) }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if job.search_score is not none %}
+<div class="card" style="margin-top:20px;">
+    <h3 style="margin-top:0;">Searched Architecture</h3>
+    <table class="kv-table">
+        <tr><th>Score</th><td>{{ "%.4f"|format(job.search_score) }}</td></tr>
+        <tr><th>Latency / FLOPs</th><td>{{ "%.2f"|format(job.search_constraint) }}</td></tr>
+        <tr><th>FLOPs</th><td>{{ "%.1fM"|format(job.search_flops / 1e6) }}</td></tr>
+        <tr><th>Params</th><td>{{ "%.1fM"|format(job.search_params / 1e6) }}</td></tr>
+    </table>
+</div>
+{% endif %}
+
+<div class="card" style="margin-top:20px;">
+    <table class="kv-table">
+        <tr><th>Dataset ID</th><td><a href="/datasets/{{ job.dataset_id }}">{{ job.dataset_id }}</a></td></tr>
+        <tr><th>Device</th><td>{{ job.device_type }}</td></tr>
+        <tr><th>Budget</th><td>{{ "%.2f"|format(job.budget) }}</td></tr>
+        {% if job.structure_str %}
+        <tr><th>Architecture</th><td><code style="word-break:break-all;">{{ job.structure_str }}</code></td></tr>
+        {% endif %}
+        {% if job.error_message %}
+        <tr><th>Error</th><td style="color:red;">{{ job.error_message }}</td></tr>
+        {% endif %}
+        <tr><th>Created</th><td>{{ job.created_at[:19] if job.created_at else "" }}</td></tr>
+        <tr><th>Started</th><td>{{ job.started_at[:19] if job.started_at else "—" }}</td></tr>
+        <tr><th>Finished</th><td>{{ job.finished_at[:19] if job.finished_at else "—" }}</td></tr>
+    </table>
+</div>
+
+<div class="actions" style="margin-top:20px;">
+    {% if job.status == 'completed' %}
+    <a href="/api/download/{{ job.id }}" class="btn btn-primary">Download Model (.pt)</a>
+    {% endif %}
+    {% if job.status in ('pending', 'searching') %}
+    <form method="post" action="/api/jobs/{{ job.id }}/cancel" style="display:inline">
+        <button type="submit" class="btn btn-danger">Cancel Job</button>
+    </form>
+    {% endif %}
+</div>
+
+{% if job.status in ('searching', 'training', 'exporting') %}
+<script>
+(function poll() {
+    fetch('/api/jobs/{{ job.id }}/status')
+        .then(r => r.json())
+        .then(data => {
+            if (data.status !== '{{ job.status }}') {
+                // State changed — reload the page
+                location.reload();
+                return;
+            }
+            // Continue polling
+            setTimeout(poll, 1000);
+        })
+        .catch(() => setTimeout(poll, 1000));
+})();
+</script>
+{% endif %}
+{% endblock %}

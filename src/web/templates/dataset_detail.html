@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ dataset.name }} — FNAS-LCD{% endblock %}
+
+{% block content %}
+<h1>{{ dataset.name }}</h1>
+
+<div class="card">
+    <table class="kv-table">
+        <tr><th>ID</th><td>{{ dataset.id }}</td></tr>
+        <tr><th>Path</th><td><code>{{ dataset.path }}</code></td></tr>
+        <tr><th>Classes</th><td>{{ dataset.num_classes }}</td></tr>
+        <tr><th>Type</th><td>{% if dataset.is_upload %}Uploaded{% else %}Built-in{% endif %}</td></tr>
+        <tr><th>Description</th><td>{{ dataset.description }}</td></tr>
+        <tr><th>Created</th><td>{{ dataset.created_at[:19] if dataset.created_at else "" }}</td></tr>
+    </table>
+</div>
+
+<h2>Jobs using this dataset</h2>
+{% if jobs %}
+<table class="table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Device</th>
+            <th>Budget</th>
+            <th>Accuracy</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for job in jobs %}
+    <tr>
+        <td>#{{ job.id }}</td>
+        <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+        <td>{{ job.device_type }}</td>
+        <td>{{ "%.1f"|format(job.budget) }}</td>
+        <td>{{ "%.2f%%"|format(job.best_val_acc) if job.best_val_acc else "—" }}</td>
+        <td><a href="/jobs/{{ job.id }}">View</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No jobs yet.</p>
+{% endif %}
+
+<div class="actions" style="margin-top:20px;">
+    <a href="/search?dataset_id={{ dataset.id }}" class="btn btn-primary">Search with this dataset</a>
+</div>
+{% endblock %}

@@ -1,0 +1,43 @@
+# ICICLE component metadata for FNAS-LCD.
+#
+# DRAFT — several fields below are proposals, not confirmed facts, because
+# (a) this repo isn't under github.com/ICICLE-ai/ yet (transfer pending with
+# Amit), and (b) a few fields are classification/policy decisions the
+# icicle-component-info-skill says to confirm with the maintainer/team
+# rather than assume. Flagged inline with "CONFIRM:".
+
+- id: "FNAS-LCD:0.1.0"
+  owner: "Jinghua Yan"  # CONFIRM: inferred from git config (jhyan / jinghua.yan@outlook.com) — correct full name?
+  # CONFIRM: primaryThrust — this is meant to be finalized at the SDD meeting
+  # (Wednesdays 3-4pm ET) per the release guidance doc, not decided solo.
+  # Proposing core/AI4CI (AI applied to a cyberinfrastructure deployment
+  # decision — picking an efficient architecture under a latency budget for
+  # constrained/edge hardware) over core/CI4AI (infra that serves AI
+  # workloads) since FNAS-LCD is the former, not the latter.
+  primaryThrust: "core/AI4CI"
+  name: "FNAS-LCD"
+  # CONFIRM: status — AlphaRelease proposed since the service is built,
+  # containerized, and tested, but not yet deployed on ICICLE infra or used
+  # by anyone outside this project.
+  status: "AlphaRelease"
+  description: "Latency-constrained neural architecture search: an analytic, zero-shot proxy score combined with frontier enumeration over a precomputed block lookup table selects an architecture under a target latency budget, then trains and exports it. Ships as a web service (search, job tracking, model download) plus a CLI."
+  componentVersion: "0.1.0"
+  # CONFIRM: targeting the Aug/Sep 2026 quarterly release window per the
+  # release schedule — confirm this is actually the intended one.
+  targetIcicleRelease: "2026-09"
+
+  # No known dependencies on other ICICLE components yet (Tapis integration
+  # for storage/job-submission is still in progress, not a component
+  # dependency in the catalog sense) — omitting hasDependentComponents.
+
+  # CONFIRM: license not yet chosen — release guidance says to consult the
+  # IP department before picking one. Placeholder URL below assumes the
+  # eventual ICICLE-ai repo location.
+  licenseUrl: "https://github.com/ICICLE-ai/FNAS-LCD?tab=License-1-ov-file"  # TODO: real license once chosen
+  publicAccess: true  # CONFIRM
+  sourceCodeUrl: "https://github.com/ICICLE-ai/FNAS-LCD"  # TODO: repo not transferred to ICICLE-ai yet — currently at apresunreve/FNAS-LCD
+  codeReviewConducted: false  # CONFIRM — no formal review has happened yet
+  testsWritten: false  # no tests/ directory in the repo currently
+  developerDocumentationAvailable: true  # README's How-To/Explanation sections cover this
+  trainingTutorialsAvailable: false  # no ICICLE training-catalog tutorial page exists yet
+  # trainingTutorialsUrl intentionally omitted — added after catalog deployment.

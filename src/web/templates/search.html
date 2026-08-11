@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Search — FNAS-LCD{% endblock %}
+
+{% block content %}
+<h1>Architecture Search</h1>
+<p class="muted">Submits a job that searches for the best architecture under your
+budget and exports it (demo: training is skipped).</p>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+    <form method="post" class="form">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dataset_id">Dataset</label>
+                <select id="dataset_id" name="dataset_id" required>
+                    <option value="">— Select —</option>
+                    {% for ds in datasets %}
+                    <option value="{{ ds.id }}">
+                        {{ ds.name }} ({{ ds.num_classes }} classes)
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="device_type">Target Device</label>
+                <select id="device_type" name="device_type" required>
+                    {% for dev in devices %}
+                    <option value="{{ dev.name }}">
+                        {{ dev.display_name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="budget">
+                    Budget
+                    (<span id="budget-label">latency ms</span>)
+                </label>
+                <input type="number" id="budget" name="budget" step="any"
+                       required
+                       placeholder="e.g. 20 for Jetson, 10000000 for FLOPs">
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Search</button>
+    </form>
+</div>
+
+<script>
+// Update budget label when device changes
+document.getElementById('device_type').addEventListener('change', function() {
+    const label = document.getElementById('budget-label');
+    if (this.value === 'flops') {
+        label.textContent = 'FLOPs';
+        document.getElementById('budget').placeholder = 'e.g. 10000000';
+    } else {
+        label.textContent = 'latency ms';
+        document.getElementById('budget').placeholder = 'e.g. 20';
+    }
+});
+</script>
+{% endblock %}

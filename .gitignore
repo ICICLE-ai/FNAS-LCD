@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+
+# Web service runtime data
+src/web/fnas_lcd.db
+src/web/storage/uploads/*
+src/web/storage/checkpoints/*
+src/web/storage/models/*
+!src/web/storage/uploads/.gitkeep
+!src/web/storage/checkpoints/.gitkeep
+!src/web/storage/models/.gitkeep

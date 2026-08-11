@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}FNAS-LCD{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="brand">⚡ FNAS-LCD</a>
+        <div class="nav-links">
+            <a href="/">Dashboard</a>
+            <a href="/datasets">Datasets</a>
+            <a href="/search">Search</a>
+            <a href="/jobs">Jobs</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="footer">
+        <p>FNAS-LCD — Latency-Constrained Neural Architecture Search</p>
+    </footer>
+</body>
+</html>

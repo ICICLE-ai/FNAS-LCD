@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Jobs — FNAS-LCD{% endblock %}
+
+{% set status_labels = {
+    'pending': 'pending',
+    'searching': 'searching',
+    'training': 'training',
+    'exporting': 'exporting',
+    'completed': 'available for download',
+    'failed': 'failed',
+    'cancelled': 'cancelled',
+} %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Jobs</h1>
+</div>
+
+<div class="stats-grid" style="margin-bottom:20px;">
+    <div class="stat-card"><div class="stat-number">{{ stats.total }}</div><div class="stat-label">Total</div></div>
+    <div class="stat-card stat-blue"><div class="stat-number">{{ stats.running }}</div><div class="stat-label">Running</div></div>
+    <div class="stat-card stat-green"><div class="stat-number">{{ stats.completed }}</div><div class="stat-label">Completed</div></div>
+    <div class="stat-card stat-red"><div class="stat-number">{{ stats.failed }}</div><div class="stat-label">Failed</div></div>
+</div>
+
+<div class="filters">
+    {% set statuses = ['', 'pending', 'searching', 'training', 'exporting', 'completed', 'failed', 'cancelled'] %}
+    {% for s in statuses %}
+    <a href="/jobs{% if s %}?status={{ s }}{% endif %}"
+       class="btn btn-sm {% if filter_status == s %}btn-primary{% else %}btn-outline{% endif %}">
+        {{ s or 'All' }}
+    </a>
+    {% endfor %}
+</div>
+
+{% if jobs %}
+<table class="table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Dataset</th>
+            <th>Status</th>
+            <th>Device</th>
+            <th>Budget</th>
+            <th>Accuracy</th>
+            <th>Created</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for job in jobs %}
+    <tr>
+        <td>#{{ job.id }}</td>
+        <td><a href="/datasets/{{ job.dataset_id }}">{{ job.dataset_name or ('#' ~ job.dataset_id) }}</a></td>
+        <td><span class="badge badge-{{ job.status }}">{{ status_labels.get(job.status, job.status) }}</span></td>
+        <td>{{ job.device_type }}</td>
+        <td>{{ "%.1f"|format(job.budget) }}</td>
+        <td>{{ "%.2f%%"|format(job.best_val_acc) if job.best_val_acc else "—" }}</td>
+        <td>{{ job.created_at[:16] if job.created_at else "" }}</td>
+        <td><a href="/jobs/{{ job.id }}">View</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No jobs found. <a href="/search">Start one</a>.</p>
+{% endif %}
+
+{% if has_active %}
+<script>
+(function poll() {
+    const initialStatuses = {{ jobs | map(attribute='status') | list | tojson }};
+    const statusFilter = new URLSearchParams(window.location.search).get('status') || '';
+    const url = '/api/jobs' + (statusFilter ? '?status=' + encodeURIComponent(statusFilter) : '');
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            const newStatuses = data.jobs.map(j => j.status);
+            if (JSON.stringify(newStatuses) !== JSON.stringify(initialStatuses)) {
+                location.reload();
+                return;
+            }
+            setTimeout(poll, 1000);
+        })
+        .catch(() => setTimeout(poll, 1000));
+})();
+</script>
+{% endif %}
+{% endblock %}

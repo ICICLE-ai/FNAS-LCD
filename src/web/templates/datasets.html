@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Datasets — FNAS-LCD{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Datasets</h1>
+    <a href="/datasets/upload" class="btn btn-primary">Upload Dataset</a>
+</div>
+
+{% if datasets %}
+<table class="table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Classes</th>
+            <th>Type</th>
+            <th>Created</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for ds in datasets %}
+    <tr>
+        <td>{{ ds.id }}</td>
+        <td><a href="/datasets/{{ ds.id }}">{{ ds.name }}</a></td>
+        <td>{{ ds.num_classes }}</td>
+        <td>{% if ds.is_upload %}Uploaded{% else %}Built-in{% endif %}</td>
+        <td>{{ ds.created_at[:16] if ds.created_at else "" }}</td>
+        <td><a href="/datasets/{{ ds.id }}">View</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No datasets available. <a href="/datasets/upload">Upload one</a>.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,16 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+  # Allow manual runs from the GitHub Actions UI.
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: icicle-ai/cicd-templates/.github/workflows/deploy-service.yaml@main
+    secrets:
+      TAPIS_TOKEN: ${{ secrets.TAPIS_TOKEN }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
