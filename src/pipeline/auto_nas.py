@@ -162,7 +162,7 @@ def _timm_trainer_env() -> dict:
 
 
 def _train_via_timm_trainer(
-    structure_txt_path: Path,
+    structure_str: str,
     num_classes: int,
     data_dir: Path,
     save_dir: Path,
@@ -203,7 +203,7 @@ def _train_via_timm_trainer(
         str(TIMM_TRAINER),
         "--model_type", "zen",
         "--arch", masternet_arch(),
-        "--plainnet_struct_txt", str(structure_txt_path),
+        "--plainnet_struct", structure_str,
         "--dataset", "auto_imagefolder",
         "--num_classes", str(num_classes),
         "--input_image_size", str(input_image_size),
@@ -352,12 +352,10 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"Checkpoint dir: {save_dir}")
 
-    structure_txt_path = _write_structure(save_dir, structure_str)
-
     print(f"Training for {args.epochs} epochs (original recipe: auto_augment, "
           f"random_erase, bn_momentum, nesterov, mixup, label_smoothing) ...")
     _train_via_timm_trainer(
-        structure_txt_path, num_classes, data_dir, save_dir,
+        structure_str, num_classes, data_dir, save_dir,
         epochs=args.epochs,
         batch_size_per_gpu=args.batch_size,
         workers_per_gpu=args.workers,
