@@ -35,6 +35,19 @@ async def lifespan(app: FastAPI):
     ensure_bucket()
     print(f"  Database: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}")
     print(f"  Storage:  {settings.storage_dir} (local) + {settings.s3_endpoint_url}/{settings.s3_bucket} (models)")
+    if settings.tapis_enabled:
+        print(f"  Training: {settings.tapis_base_url} "
+              f"app={settings.tapis_app_id}:{settings.tapis_app_version} "
+              f"system={settings.tapis_system} queue={settings.tapis_queue}")
+        # Remote jobs outlive this process. Re-attach to any that were still
+        # running when we last stopped, otherwise they finish unobserved and
+        # their models are never collected.
+        from web.services.job_manager import job_manager
+        resumed = job_manager.resume_interrupted()
+        if resumed:
+            print(f"  Resumed:  {resumed} in-flight training job(s)")
+    else:
+        print("  Training: local (TAPIS_ENABLED=0 — models are not trained)")
     print(f"  Server:   http://{settings.host}:{settings.port}")
     yield
 

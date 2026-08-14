@@ -223,11 +223,24 @@ def parse_cmd_options(argv):
 
     parser.add_argument('--export', action='store_true')
     parser.add_argument('--quantize', action='store_true')
-    parser.add_argument('--summary_file', type=str, default='/scratch/general/nfs1/u1320844/1knetid_logs/summary.csv', help='path to summary file')
-    parser.add_argument('--completion_file', type=str, default='/scratch/general/nfs1/u1320844/1knetid_logs/summary.csv', help='path to summary file')
+    parser.add_argument('--summary_file', type=str, default=None,
+                        help='path to summary file (default: <save_dir>/summary.csv)')
+    parser.add_argument('--completion_file', type=str, default=None,
+                        help='path to completion file (default: <save_dir>/train.done)')
     parser.add_argument('--net_config', type=str, default='', help='path to network config file')
 
     opt, _ = parser.parse_known_args(argv)
+
+    # These used to default to a hardcoded absolute path under one developer's
+    # personal scratch directory, which exists on no other machine -- and not
+    # inside the training container either. Because both files are only written
+    # at the very end of main(), a wrong path failed *after* training had already
+    # completed. Derive them from save_dir instead so they are always valid.
+    if opt.summary_file is None:
+        opt.summary_file = os.path.join(opt.save_dir, 'summary.csv')
+    if opt.completion_file is None:
+        opt.completion_file = os.path.join(opt.save_dir, 'train.done')
+
     return opt
 
 

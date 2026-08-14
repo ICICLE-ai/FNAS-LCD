@@ -3,6 +3,16 @@ __pycache__/
 .DS_Store
 .venv/
 
+# Local configuration — .env holds real credentials (Tapis client key, refresh
+# token, database and object-storage secrets). Only .env.example, which has
+# empty values, belongs in version control.
+.env
+.env.*
+!.env.example
+
+# Working notes from development sessions — local scratch, not project docs.
+SESSION_HANDOFF.md
+
 # Web service runtime data
 src/web/fnas_lcd.db
 src/web/storage/uploads/*

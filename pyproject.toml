@@ -16,6 +16,14 @@ dependencies = [
     "aiofiles>=23.0",
     "psycopg[binary]>=3.1",
     "boto3>=1.34",
+    # Tapis client — used to submit training jobs to OSC (see
+    # src/web/services/tapis_service.py). Training runs remotely on GPU
+    # hardware; the service only submits, polls, and fetches results.
+    "tapipy>=1.6",
+    # Used directly for the OAuth token endpoint (tapis_service). tapipy pulls
+    # requests in anyway, but relying on a transitive dependency for a direct
+    # import breaks silently if tapipy ever changes its HTTP client.
+    "requests>=2.31",
 ]
 
 # Application, not a library — skip build-backend/packaging entirely.
