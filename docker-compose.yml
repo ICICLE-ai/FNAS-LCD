@@ -46,6 +46,25 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-fnas_lcd}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-fnas_lcd_secret}
       S3_BUCKET: ${S3_BUCKET:-fnas-lcd-models}
+      # Remote GPU training via Tapis. Defaults to off so the stack comes up
+      # without credentials; set TAPIS_ENABLED=1 in .env to submit real jobs.
+      TAPIS_ENABLED: ${TAPIS_ENABLED:-0}
+      TAPIS_BASE_URL: ${TAPIS_BASE_URL:-https://icicleai.tapis.io}
+      TAPIS_USERNAME: ${TAPIS_USERNAME:-}
+      TAPIS_PASSWORD: ${TAPIS_PASSWORD:-}
+      TAPIS_JWT: ${TAPIS_JWT:-}
+      TAPIS_CLIENT_ID: ${TAPIS_CLIENT_ID:-}
+      TAPIS_CLIENT_KEY: ${TAPIS_CLIENT_KEY:-}
+      TAPIS_REFRESH_TOKEN: ${TAPIS_REFRESH_TOKEN:-}
+      TAPIS_APP_ID: ${TAPIS_APP_ID:-fnas-lcd-train}
+      TAPIS_APP_VERSION: ${TAPIS_APP_VERSION:-0.1.3}
+      TAPIS_SYSTEM: ${TAPIS_SYSTEM:-pitzer-tapis}
+      TAPIS_QUEUE: ${TAPIS_QUEUE:-gpu-exp}
+      TAPIS_STAGE_MODE: ${TAPIS_STAGE_MODE:-in_place}
+      TOY_DATASET_REMOTE_PATH: ${TOY_DATASET_REMOTE_PATH:-}
+      TAPIS_WORK_BASE: ${TAPIS_WORK_BASE:-}
+      TAPIS_POLL_SECONDS: ${TAPIS_POLL_SECONDS:-30}
+      TAPIS_MAX_MINUTES: ${TAPIS_MAX_MINUTES:-1440}
       PORT: 8000
     ports:
       - "8000:8000"
