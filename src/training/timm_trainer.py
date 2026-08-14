@@ -3,7 +3,7 @@ Copyright (C) 2010-2021 Alibaba Group Holding Limited.
 Single GPU version without Horovod support.
 '''
 
-import os, sys, copy, time, logging
+import os, sys, copy, time, json, logging
 
 import torch
 import torch.nn.functional as F
@@ -1205,6 +1205,84 @@ def main(opt, argv):
 
     # mark job done
     # write to summary file
+    # Only save_dir is created for us (in save_checkpoint); the summary and
+    # completion files are opened directly, so ensure their parents exist --
+    # otherwise a fully-completed training run dies here on a bookkeeping write.
+    for _bookkeeping_path in (opt.summary_file, opt.completion_file):
+        _parent = os.path.dirname(os.path.abspath(_bookkeeping_path))
+        if _parent:
+            global_utils.mkdir(_parent)
+
+    # ── optional: export the trained model to TorchScript ──────────────
+    # --export_onnx above is an export-*only* mode: it loads a checkpoint and
+    # returns before training. This runs after training instead, so one job
+    # produces both the checkpoint and a ready-to-serve model. Consumers
+    # (e.g. a web service handing users a download) then need no torch of
+    # their own to turn weights into a usable artifact.
+    exported_model = None
+    if opt.rank == 0 and getattr(opt, 'export', False):
+        try:
+            best_ckpt = os.path.join(opt.save_dir, 'best-params_rank0.pth')
+            if not os.path.isfile(best_ckpt):
+                best_ckpt = os.path.join(opt.save_dir, 'best-params.pth')
+            if not os.path.isfile(best_ckpt):
+                raise FileNotFoundError(f'no best checkpoint in {opt.save_dir}')
+
+            map_location = 'cpu' if opt.gpu is None else 'cuda:{}'.format(opt.gpu)
+            # Trace the bare module, not a DDP wrapper.
+            export_model = model.module if hasattr(model, 'module') else model
+            # The in-memory model is from the *last* epoch; the best one may be
+            # earlier, so always reload from the best checkpoint.
+            export_model = load_model(export_model, best_ckpt,
+                                      strict_load=False, map_location=map_location)
+            # Trace on CPU so the artifact is portable. export_model_to_torchscript
+            # traces with a dummy input on the model's own device, and a model
+            # traced on GPU bakes CUDA in: torch.jit.load() then fails with
+            # "Found no NVIDIA driver" on a CPU-only machine unless the caller
+            # knows to pass map_location. Consumers of this file (e.g. someone
+            # downloading it from the web service) should not have to.
+            export_model = export_model.cpu()
+            export_model.eval()
+
+            ts_path = os.path.join(opt.save_dir, 'model.pt')
+            export_model_to_torchscript(export_model, ts_path, opt.input_image_size,
+                                        batch_size=1, num_channels=3)
+            exported_model = os.path.basename(ts_path)
+            logging.info('Exported trained model to {}'.format(ts_path))
+        except Exception as e:  # noqa: BLE001
+            # A failed export must not discard a completed training run --
+            # the checkpoint and metrics are still valid and still archive.
+            logging.error('Post-training export failed: {}'.format(e))
+
+    # Single self-describing record of the final result, written to save_dir.
+    # summary_file/completion_file are append-mode logs shared across many runs
+    # and their column layout varies by model_type; this one is per-run, always
+    # the same shape, and names the architecture it belongs to.
+    if opt.rank == 0:
+        best_metrics_file = os.path.join(opt.save_dir, 'best_metrics.json')
+        with open(best_metrics_file, 'w') as f:
+            json.dump({
+                'best_acc1': training_status_info['best_acc1'],
+                'best_acc5': training_status_info['best_acc5'],
+                'best_acc1_at_epoch': training_status_info['best_acc1_at_epoch'],
+                'best_acc5_at_epoch': training_status_info['best_acc5_at_epoch'],
+                'best_test_acc1': training_status_info.get('best_test_acc1'),
+                'best_test_acc1_at_epoch': training_status_info.get('best_test_acc1_at_epoch'),
+                'epochs': opt.epochs,
+                'dataset': opt.dataset,
+                'num_classes': opt.num_classes,
+                'model_type': opt.model_type,
+                'plainnet_struct': opt.plainnet_struct or opt.plainnet_struct_txt,
+                'input_image_size': opt.input_image_size,
+                'training_elasped_time': training_status_info.get('training_elasped_time'),
+                # Filename of the TorchScript export, or null if not requested
+                # / it failed -- lets a consumer tell "no export asked for"
+                # apart from "export was expected but is missing".
+                'exported_model': exported_model,
+            }, f, indent=2)
+            f.write('\n')
+        logging.info('Wrote best metrics to {}'.format(best_metrics_file))
+
     if not os.path.exists(opt.summary_file):
         with open(opt.summary_file, 'w') as f:
             f.write('')
@@ -1259,8 +1337,14 @@ def main(opt, argv):
 
 if __name__ == "__main__":
     import argparse
-    # Add net_id and csv_file_path arguments before parsing
-    parser = argparse.ArgumentParser()
+    # Add net_id and csv_file_path arguments before parsing.
+    #
+    # allow_abbrev=False is essential here: this parser runs parse_known_args()
+    # and passes the remainder to global_utils.parse_cmd_options(). With
+    # abbreviation enabled, a flag defined *there* can be silently swallowed
+    # here by an unambiguous-prefix match -- e.g. `--export` was captured as
+    # `--export_onnx`, turning a training run into export-only mode.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--net_id', type=int, default=None, help='Network ID to parse from CSV file')
     parser.add_argument('--csv_file_path', type=str, default='sampled_1k_15ms_a57.csv', help='Path to CSV file containing network architectures')
     parser.add_argument('--cfg_txt_path', type=str, default=None,
