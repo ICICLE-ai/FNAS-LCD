@@ -78,10 +78,11 @@ _STATIC = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
 # ── routers ────────────────────────────────────────────────────────────────
-from web.routers import api, ui
+from web.routers import api, auth, ui
 
 app.include_router(ui.router)    # HTML pages (no prefix)
 app.include_router(api.router)   # JSON API (/api prefix)
+app.include_router(auth.router)  # Tapis OAuth account-connection routes
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────

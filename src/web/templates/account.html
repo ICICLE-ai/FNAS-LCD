@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Account — FNAS-LCD{% endblock %}
+
+{% block content %}
+<h1>Account</h1>
+
+<div class="card">
+    {% if tapis_username %}
+    <p>Connected as <strong>{{ tapis_username }}</strong>. Training jobs you
+       submit run under your own Tapis account.</p>
+    <form method="post" action="/auth/tapis/logout">
+        <button type="submit" class="btn">Disconnect</button>
+    </form>
+    {% else %}
+    <p class="muted">No Tapis account connected. Jobs cannot be submitted
+       until you connect one — training always runs under the identity that
+       submitted it, never a shared account.</p>
+    <a href="/auth/tapis/login" class="btn btn-primary">Connect your Tapis account</a>
+    {% endif %}
+</div>
+{% endblock %}

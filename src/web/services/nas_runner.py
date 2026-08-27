@@ -118,7 +118,8 @@ def _load_job(job_id: int) -> dict | None:
 
 
 def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
-                         save_dir: Path, output_path: Path) -> float | None:
+                         save_dir: Path, output_path: Path,
+                         submitted_by: str | None = None) -> float | None:
     """Retrieve the trained model from a finished Tapis job.
 
     Prefers a TorchScript model exported by the training job itself, which
@@ -126,17 +127,22 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
     checkpoint, so fall back to rebuilding the architecture and loading the
     weights here.
 
+    `submitted_by` selects which Tapis identity to download the outputs as
+    (must match whoever the job was submitted under) — None uses the shared
+    service account.
+
     Returns the best validation accuracy if the job reported it.
     """
     import json
 
     from . import tapis_service
 
-    available = tapis_service.list_outputs(uuid)
+    available = tapis_service.list_outputs(uuid, tapis_username=submitted_by)
 
     # Preferred: the job exported a ready-to-serve model.
     if tapis_service.MODEL_FILE in available:
-        data = tapis_service.download_output(uuid, tapis_service.MODEL_FILE)
+        data = tapis_service.download_output(uuid, tapis_service.MODEL_FILE,
+                                              tapis_username=submitted_by)
         if data:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(data)
@@ -144,7 +150,8 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
             raise RuntimeError(f"could not download {tapis_service.MODEL_FILE}")
     else:
         # Fallback: raw checkpoint -> rebuild + trace locally.
-        data = tapis_service.download_output(uuid, tapis_service.CHECKPOINT_FILE)
+        data = tapis_service.download_output(uuid, tapis_service.CHECKPOINT_FILE,
+                                              tapis_username=submitted_by)
         if not data:
             raise RuntimeError(
                 f"training job {uuid} produced neither {tapis_service.MODEL_FILE} "
@@ -160,7 +167,8 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
         )
 
     # Metrics are optional: older training containers do not emit them.
-    metrics = tapis_service.download_output(uuid, tapis_service.METRICS_FILE)
+    metrics = tapis_service.download_output(uuid, tapis_service.METRICS_FILE,
+                                             tapis_username=submitted_by)
     if not metrics:
         return None
     try:
@@ -208,10 +216,13 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
               f"datasets can be trained remotely.")
         return None
 
+    submitted_by = job.get("submitted_by")
+
     uuid = job.get("tapis_job_uuid")
     if not uuid:
         try:
             uuid = tapis_service.submit_training(
+                tapis_username=submitted_by,
                 name=f"fnas-lcd-job-{job_id}",
                 structure_str=job["structure_str"],
                 num_classes=ds_row["num_classes"],
@@ -234,13 +245,13 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
     while True:
         if cancel_event.is_set():
             try:
-                tapis_service.cancel(uuid)
+                tapis_service.cancel(uuid, tapis_username=submitted_by)
             except Exception:  # noqa: BLE001
                 pass
             return None
 
         try:
-            state = tapis_service.get_status(uuid)
+            state = tapis_service.get_status(uuid, tapis_username=submitted_by)
         except Exception as e:  # noqa: BLE001
             _fail(job_id, f"Lost contact with the training job {uuid}: {e}")
             return None
@@ -250,8 +261,9 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
         time.sleep(settings.tapis_poll_seconds)
 
     if state != "FINISHED":
-        detail = tapis_service.get_last_message(uuid) or state
-        log = tapis_service.download_output(uuid, tapis_service.LOG_FILE)
+        detail = tapis_service.get_last_message(uuid, tapis_username=submitted_by) or state
+        log = tapis_service.download_output(uuid, tapis_service.LOG_FILE,
+                                            tapis_username=submitted_by)
         if log:
             detail += "\n" + log.decode(errors="replace")[-2000:]
         _fail(job_id, f"Training job {state}: {detail}")
@@ -377,7 +389,8 @@ def execute_job(job_id: int, cancel_event: threading.Event):
     try:
         if tapis_uuid is not None:
             best_val_acc = _fetch_trained_model(
-                tapis_uuid, structure_str, num_classes, save_dir, local_output_path
+                tapis_uuid, structure_str, num_classes, save_dir, local_output_path,
+                submitted_by=job.get("submitted_by"),
             )
         else:
             _export_fresh_model(

@@ -25,7 +25,10 @@ CHECKPOINT_FILE = "best-params_rank0.pth"    # always present
 METRICS_FILE = "best_metrics.json"
 LOG_FILE = "tapisjob.out"
 
-_client = None
+# Keyed by tapis_username; the shared/service-account session lives under
+# key None. Each identity's Tapis session is independent and cached/rotated
+# separately.
+_clients: dict = {}
 _client_lock = threading.Lock()
 
 
@@ -82,6 +85,38 @@ def _store_refresh_token(token: str) -> bool:
         return False
 
 
+def _load_user_refresh_token(tapis_username: str) -> Optional[str]:
+    """Read a specific user's stored refresh token, if they've connected."""
+    try:
+        from ..database import get_db
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT refresh_token FROM user_tapis_credentials WHERE tapis_username=%s",
+                (tapis_username,),
+            ).fetchone()
+        return row["refresh_token"] if row else None
+    except Exception:  # noqa: BLE001 - absence of a DB is not fatal here
+        return None
+
+
+def _store_user_refresh_token(tapis_username: str, token: str) -> bool:
+    """Persist (or rotate) one user's refresh token. Returns True if stored."""
+    try:
+        from ..database import get_db
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_tapis_credentials (tapis_username, refresh_token) "
+                "VALUES (%s, %s) ON CONFLICT (tapis_username) DO UPDATE "
+                "SET refresh_token = EXCLUDED.refresh_token, "
+                "updated_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')",
+                (tapis_username, token),
+            )
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: could not persist Tapis refresh token for {tapis_username}: {e}")
+        return False
+
+
 def _post_token_request(payload: dict) -> dict:
     import requests
 
@@ -129,11 +164,77 @@ def bootstrap_refresh_token(username: str, password: str) -> str:
     return refresh
 
 
-def _access_token_from_refresh() -> str:
-    """Trade the stored refresh token for an access token, persisting rotation."""
-    token = _load_stored_refresh_token() or settings.tapis_refresh_token
+def exchange_authorization_code(code: str, redirect_uri: str) -> tuple[str, str]:
+    """Exchange a browser-flow authorization code for an access + refresh token.
+
+    Called once from the OAuth callback route, right after the user has
+    authenticated in their own browser and Tapis redirected back with `code`.
+    """
+    if not settings.tapis_client_id or not settings.tapis_client_key:
+        raise TapisNotConfigured(
+            "TAPIS_CLIENT_ID/TAPIS_CLIENT_KEY are required for the "
+            "authorization_code exchange."
+        )
+    result = _post_token_request({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": settings.tapis_client_id,
+        "client_key": settings.tapis_client_key,
+    })
+    access = _unwrap(result, "access_token")
+    refresh = _unwrap(result, "refresh_token")
+    if not access or not refresh:
+        raise RuntimeError(
+            "Tapis did not return both an access and refresh token for the "
+            "authorization_code exchange."
+        )
+    return access, refresh
+
+
+def get_userinfo(access_token: str) -> str:
+    """Return the Tapis username an access token belongs to."""
+    import requests
+
+    resp = requests.get(
+        f"{settings.tapis_base_url}/v3/oauth2/userinfo",
+        headers={"X-Tapis-Token": access_token},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Tapis userinfo request failed "
+                           f"({resp.status_code}): {resp.text[:300]}")
+    return resp.json()["result"]["username"]
+
+
+def connect_user(code: str, redirect_uri: str) -> str:
+    """Complete the OAuth callback for one browser session: exchange the
+    authorization code, identify the user, and persist their refresh token.
+
+    Returns the connected Tapis username.
+    """
+    access_token, refresh_token = exchange_authorization_code(code, redirect_uri)
+    tapis_username = get_userinfo(access_token)
+    _store_user_refresh_token(tapis_username, refresh_token)
+    return tapis_username
+
+
+def _access_token_from_refresh(tapis_username: Optional[str] = None) -> str:
+    """Trade a stored refresh token for an access token, persisting rotation.
+
+    `tapis_username=None` (the default) uses the shared service-account
+    credential; a given username uses that user's own connected credential
+    instead — the two are stored and rotated completely independently.
+    """
+    if tapis_username is None:
+        token = _load_stored_refresh_token() or settings.tapis_refresh_token
+    else:
+        token = _load_user_refresh_token(tapis_username)
     if not token:
-        raise TapisNotConfigured("no Tapis refresh token available")
+        raise TapisNotConfigured(
+            "no Tapis refresh token available" if tapis_username is None
+            else f"user {tapis_username!r} has not connected a Tapis account"
+        )
 
     result = _post_token_request({
         "grant_type": "refresh_token",
@@ -149,14 +250,30 @@ def _access_token_from_refresh() -> str:
     # replacement must be persisted or the next refresh will fail.
     rotated = _unwrap(result, "refresh_token")
     if rotated and rotated != token:
-        _store_refresh_token(rotated)
+        if tapis_username is None:
+            _store_refresh_token(rotated)
+        else:
+            _store_user_refresh_token(tapis_username, rotated)
     return access
 
 
 # ── connection ─────────────────────────────────────────────────────────────
 
-def _build_client():
+def _build_client(tapis_username: Optional[str] = None):
     from tapipy.tapis import Tapis
+
+    if tapis_username is not None:
+        # Per-user credential: use only that user's own stored refresh token.
+        # Deliberately no fallthrough to the shared/password paths below --
+        # falling back would silently submit the job under the shared
+        # service identity instead of the user it's supposed to belong to.
+        if not settings.tapis_client_id or not settings.tapis_client_key:
+            raise TapisNotConfigured(
+                "TAPIS_CLIENT_ID/TAPIS_CLIENT_KEY are required for per-user "
+                "Tapis credentials."
+            )
+        return Tapis(base_url=settings.tapis_base_url,
+                     access_token=_access_token_from_refresh(tapis_username))
 
     # 1. OAuth client + refresh token — no user password held by the service.
     if settings.tapis_client_id and settings.tapis_client_key and (
@@ -186,21 +303,24 @@ def _build_client():
     return t
 
 
-def get_client(force_refresh: bool = False):
-    """Return a cached Tapis session, creating or refreshing it as needed.
+def get_client(tapis_username: Optional[str] = None, force_refresh: bool = False):
+    """Return a cached Tapis session for one identity, building it if needed.
+
+    `tapis_username=None` is the shared service-account session (unchanged
+    default behavior). Passing a username selects that user's own session,
+    cached and refreshed independently under its own key.
 
     Access tokens are short-lived (hours), and a job can outlive one, so
     callers re-authenticate on an auth failure rather than assuming the token
     obtained at startup is still valid.
     """
-    global _client
     with _client_lock:
-        if _client is None or force_refresh:
-            _client = _build_client()
-        return _client
+        if tapis_username not in _clients or force_refresh:
+            _clients[tapis_username] = _build_client(tapis_username)
+        return _clients[tapis_username]
 
 
-def _call(fn_name: str, **kwargs):
+def _call(fn_name: str, tapis_username: Optional[str] = None, **kwargs):
     """Invoke a jobs API method, retrying once with a fresh token on failure.
 
     tapipy surfaces auth failures as assorted exception types depending on the
@@ -208,9 +328,9 @@ def _call(fn_name: str, **kwargs):
     retry once with a new session; a genuine error fails the same way twice.
     """
     try:
-        return getattr(get_client().jobs, fn_name)(**kwargs)
+        return getattr(get_client(tapis_username).jobs, fn_name)(**kwargs)
     except Exception:
-        return getattr(get_client(force_refresh=True).jobs, fn_name)(**kwargs)
+        return getattr(get_client(tapis_username, force_refresh=True).jobs, fn_name)(**kwargs)
 
 
 # ── submit ─────────────────────────────────────────────────────────────────
@@ -330,47 +450,54 @@ def build_job_body(
     return body
 
 
-def submit_training(**kwargs) -> str:
-    """Submit a training job. Returns the Tapis job UUID."""
+def submit_training(*, tapis_username: Optional[str] = None, **kwargs) -> str:
+    """Submit a training job. Returns the Tapis job UUID.
+
+    `tapis_username=None` submits under the shared service account (default,
+    unchanged behavior); a given username submits under that user's own
+    connected Tapis identity instead.
+    """
     body = build_job_body(**kwargs)
-    resp = _call("submitJob", **body)
+    resp = _call("submitJob", tapis_username=tapis_username, **body)
     return resp.uuid
 
 
 # ── monitor ────────────────────────────────────────────────────────────────
 
-def get_status(uuid: str) -> str:
-    return _call("getJobStatus", jobUuid=uuid).status
+def get_status(uuid: str, tapis_username: Optional[str] = None) -> str:
+    return _call("getJobStatus", tapis_username=tapis_username, jobUuid=uuid).status
 
 
-def get_last_message(uuid: str) -> str:
+def get_last_message(uuid: str, tapis_username: Optional[str] = None) -> str:
     try:
-        return _call("getJob", jobUuid=uuid).lastMessage or ""
+        return _call("getJob", tapis_username=tapis_username, jobUuid=uuid).lastMessage or ""
     except Exception:  # noqa: BLE001 - diagnostics only
         return ""
 
 
-def cancel(uuid: str) -> None:
-    _call("cancelJob", jobUuid=uuid)
+def cancel(uuid: str, tapis_username: Optional[str] = None) -> None:
+    _call("cancelJob", tapis_username=tapis_username, jobUuid=uuid)
 
 
 # ── outputs ────────────────────────────────────────────────────────────────
 
-def list_outputs(uuid: str) -> list[str]:
+def list_outputs(uuid: str, tapis_username: Optional[str] = None) -> list[str]:
     """Names of files in the job's output directory (empty on failure)."""
     try:
         # The API path is /output/list/{outputPath} and outputPath must end
         # with '/'; it is relative to the job's output directory.
-        listing = _call("getJobOutputList", jobUuid=uuid, outputPath="/")
+        listing = _call("getJobOutputList", tapis_username=tapis_username,
+                        jobUuid=uuid, outputPath="/")
     except Exception:  # noqa: BLE001
         return []
     return [getattr(f, "name", str(f)) for f in listing]
 
 
-def download_output(uuid: str, name: str) -> Optional[bytes]:
+def download_output(uuid: str, name: str, tapis_username: Optional[str] = None) -> Optional[bytes]:
     """Fetch one output file. Returns None if it is absent or unreadable."""
     try:
-        data = _call("getJobOutputDownload", jobUuid=uuid, outputPath=name)
+        data = _call("getJobOutputDownload", tapis_username=tapis_username,
+                     jobUuid=uuid, outputPath=name)
     except Exception:  # noqa: BLE001
         return None
     if isinstance(data, str):
