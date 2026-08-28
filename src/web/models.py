@@ -108,6 +108,7 @@ class JobResponse(BaseModel):
     created_at: str = ""
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    submitted_by: Optional[str] = None
 
     class Config:
         from_attributes = True

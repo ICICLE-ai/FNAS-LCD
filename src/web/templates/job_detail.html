@@ -58,6 +58,7 @@
 <div class="card" style="margin-top:20px;">
     <table class="kv-table">
         <tr><th>Dataset ID</th><td><a href="/datasets/{{ job.dataset_id }}">{{ job.dataset_id }}</a></td></tr>
+        <tr><th>Submitted by</th><td>{{ job.submitted_by or "—" }}</td></tr>
         <tr><th>Device</th><td>{{ job.device_type }}</td></tr>
         <tr><th>Budget</th><td>{{ "%.2f"|format(job.budget) }}</td></tr>
         {% if job.structure_str %}

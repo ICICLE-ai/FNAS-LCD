@@ -8,10 +8,11 @@ __pycache__/
 # empty values, belongs in version control.
 .env
 .env.*
+*.env
 !.env.example
 
 # Working notes from development sessions — local scratch, not project docs.
-SESSION_HANDOFF.md
+*.md
 
 # Web service runtime data
 src/web/fnas_lcd.db

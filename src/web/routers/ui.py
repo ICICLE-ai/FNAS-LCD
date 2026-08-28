@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..database import get_db
+from ..deps import apply_session_cookie, get_session
 from .api import _row_to_dataset, _row_to_job
 from ..services import dataset_service
 
@@ -159,9 +160,11 @@ def search_form(request: Request):
 @router.post("/search", response_class=HTMLResponse)
 def search_run(
     request: Request,
+    response: Response,
     dataset_id: int = Form(...),
     device_type: str = Form(...),
     budget: float = Form(...),
+    session: dict = Depends(get_session),
 ):
     """Submit a job: search + export run in the background (demo: training
     is skipped). Redirects home with a 'submitted' flash; track progress
@@ -179,20 +182,31 @@ def search_run(
     if dev is None:
         raise HTTPException(400, f"Unknown device: {device_type}")
 
+    if not session.get("tapis_username"):
+        page = templates.TemplateResponse(request, "search.html", {
+            "datasets": [_row_to_dataset(r) for r in datasets],
+            "devices": [dict(r) for r in devices],
+            "error": "Connect your Tapis account before submitting a job.",
+        })
+        return apply_session_cookie(response, page)
+
     try:
         job = job_manager.create_and_start(
             dataset_id=dataset_id,
             device_type=device_type,
             budget=budget,
+            submitted_by=session["tapis_username"],
         )
     except ValueError as e:
-        return templates.TemplateResponse(request, "search.html", {
+        page = templates.TemplateResponse(request, "search.html", {
             "datasets": [_row_to_dataset(r) for r in datasets],
             "devices": [dict(r) for r in devices],
             "error": str(e),
         })
+        return apply_session_cookie(response, page)
 
-    return RedirectResponse(f"/?submitted={job.id}", status_code=303)
+    redirect = RedirectResponse(f"/?submitted={job.id}", status_code=303)
+    return apply_session_cookie(response, redirect)
 
 
 # ── jobs ───────────────────────────────────────────────────────────────────
@@ -210,6 +224,14 @@ def jobs_page(request: Request, status: str | None = Query(None)):
         "stats": stats,
         "filter_status": status or "",
     })
+
+
+@router.get("/account", response_class=HTMLResponse)
+def account_page(request: Request, response: Response, session: dict = Depends(get_session)):
+    page = templates.TemplateResponse(request, "account.html", {
+        "tapis_username": session.get("tapis_username"),
+    })
+    return apply_session_cookie(response, page)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
 from ..config import settings
 from ..database import get_db
+from ..deps import get_session
 from ..services import storage_service
 from ..models import (
     DatasetListResponse,
@@ -72,6 +73,7 @@ def _row_to_job(row) -> JobResponse:
         created_at=row["created_at"] or "",
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        submitted_by=row["submitted_by"] if "submitted_by" in row_keys else None,
     )
 
 
@@ -192,9 +194,18 @@ def run_search(req: SearchRequest):
 # ── jobs stub (full impl in Phase 4) ───────────────────────────────────────
 
 @router.post("/jobs", response_model=JobResponse)
-def create_job(req: JobCreateRequest):
-    """Create and start a training job."""
+def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
+    """Create and start a training job.
+
+    Requires a connected Tapis account (see /account) -- jobs always run
+    under the identity that submitted them, never a shared fallback account.
+    """
     from ..services.job_manager import job_manager
+
+    if not session.get("tapis_username"):
+        raise HTTPException(
+            403, "Connect your Tapis account (GET /account) before submitting a job."
+        )
 
     with get_db() as conn:
         ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (req.dataset_id,)).fetchone()
@@ -219,6 +230,7 @@ def create_job(req: JobCreateRequest):
             gpu=req.gpu,
             max_iters=req.max_iters,
             structure_str=req.structure_str,
+            submitted_by=session["tapis_username"],
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

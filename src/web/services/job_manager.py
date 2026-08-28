@@ -38,8 +38,15 @@ class JobManager:
         gpu: int = 0,
         max_iters: Optional[int] = None,
         structure_str: Optional[str] = None,
+        submitted_by: Optional[str] = None,
     ) -> JobResponse:
-        """Create a job row and launch it in a background thread."""
+        """Create a job row and launch it in a background thread.
+
+        `submitted_by` is the Tapis username of the connected user, when the
+        caller has one (see `deps.get_session`) — persisted on the row so the
+        job runs under that user's own Tapis credential rather than the
+        shared service account, and so responsibility for the job is known.
+        """
         import datetime as dt
 
         save_dir = settings.checkpoints_dir / f"job_{0}"  # placeholder
@@ -49,12 +56,12 @@ class JobManager:
                 """INSERT INTO jobs
                    (dataset_id, device_type, budget, metric, aggregate,
                     epochs, warmup, batch_size, workers, lr, gpu, max_iters,
-                    structure_str, status, save_dir)
-                   VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s, 'pending', '')
+                    structure_str, status, save_dir, submitted_by)
+                   VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s, 'pending', '', %s)
                    RETURNING id""",
                 (dataset_id, device_type, budget, metric, aggregate,
                  epochs, warmup, batch_size, workers, lr, gpu, max_iters,
-                 structure_str),
+                 structure_str, submitted_by),
             )
             job_id = cursor.fetchone()["id"]
 
@@ -97,7 +104,8 @@ class JobManager:
         # Check current status
         with get_db() as conn:
             row = conn.execute(
-                "SELECT status, tapis_job_uuid FROM jobs WHERE id=%s", (job_id,)
+                "SELECT status, tapis_job_uuid, submitted_by FROM jobs WHERE id=%s",
+                (job_id,),
             ).fetchone()
         if row is None:
             return False
@@ -117,7 +125,7 @@ class JobManager:
         if row["tapis_job_uuid"]:
             try:
                 from .tapis_service import cancel as tapis_cancel
-                tapis_cancel(row["tapis_job_uuid"])
+                tapis_cancel(row["tapis_job_uuid"], tapis_username=row["submitted_by"])
             except Exception as e:  # noqa: BLE001
                 # The local job is still cancelled; surface the remote failure
                 # rather than pretending everything stopped cleanly.

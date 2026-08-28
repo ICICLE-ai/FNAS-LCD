@@ -68,6 +68,27 @@ CREATE TABLE IF NOT EXISTS service_credentials (
     updated_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
 );
 
+-- Browser sessions. An opaque random id in an HttpOnly cookie maps to a row
+-- here; nothing about the session is derivable from the cookie value itself
+-- (no signing), so a stolen cookie is only as powerful as a stolen DB row,
+-- and revoking a session is a DELETE.
+CREATE TABLE IF NOT EXISTS sessions (
+    id              TEXT PRIMARY KEY,
+    tapis_username  TEXT,
+    created_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS'),
+    last_seen_at    TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
+);
+
+-- Per-user Tapis OAuth credentials, one row per Tapis account that has
+-- connected via the authorization_code flow. Keyed by tapis_username (the
+-- identity Tapis itself reports via /v3/oauth2/userinfo), separate from
+-- service_credentials (the single shared/fallback service account).
+CREATE TABLE IF NOT EXISTS user_tapis_credentials (
+    tapis_username  TEXT PRIMARY KEY,
+    refresh_token   TEXT NOT NULL,
+    updated_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
+);
+
 CREATE TABLE IF NOT EXISTS device_configs (
     id              SERIAL PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
@@ -101,6 +122,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     search_constraint REAL,
     search_flops    REAL,
     search_params   REAL,
+    submitted_by    TEXT,
     created_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS'),
     started_at      TEXT,
     finished_at     TEXT
@@ -118,6 +140,10 @@ _JOBS_MIGRATION_COLUMNS = {
     # UUID of the Tapis job doing the training. Persisted so a service restart
     # can re-attach to jobs still running on the HPC system.
     "tapis_job_uuid": "TEXT",
+    # Tapis username of the submitter, when known (session-authenticated
+    # requests). NULL for jobs submitted before this existed, or through the
+    # shared-service-account fallback path (no session).
+    "submitted_by": "TEXT",
 }
 
 _DATASETS_MIGRATION_COLUMNS = {
