@@ -39,12 +39,16 @@ a web service (search, live job tracking, model download).
    docker compose ps   # all three services should show Up / healthy
    ```
 2. Open `http://localhost:8000` in a browser.
-3. On the **Search** page, pick the bundled toy dataset (100 classes), a target device
+3. If remote training is enabled (`TAPIS_ENABLED=1` — see
+   [Configure remote training](#configure-remote-training-tapis) below), go to
+   **Account** and connect your Tapis account first; job submission is
+   rejected otherwise. With `TAPIS_ENABLED=0` (the default), skip this step.
+4. On the **Search** page, pick the bundled toy dataset (100 classes), a target device
    (e.g. "Jetson GPU"), and a latency budget in milliseconds (e.g. `20`), then submit.
-4. You'll land back on the dashboard with a "Submitted job #N" confirmation. Click
+5. You'll land back on the dashboard with a "Submitted job #N" confirmation. Click
    through to the job page to watch it move live through
    `searching → training → exporting → completed` (status updates every second).
-5. Once completed, click **Download Model (.pt)** to get the exported TorchScript model.
+6. Once completed, click **Download Model (.pt)** to get the exported TorchScript model.
 
 ## Run your first architecture search (CLI, no web service)
 
@@ -94,6 +98,34 @@ archive in ImageFolder format (max 10GB). The service extracts it, validates the
 The **Jobs** page lists every job with live status and filtering by status. A job can
 be cancelled from its detail page while still `pending`/`searching`.
 
+## Configure remote training (Tapis)
+Training runs as a real GPU job on an HPC system (OSC Pitzer) via
+[Tapis](https://tapis-project.org/), not in this container. With
+`TAPIS_ENABLED=0` (the default) the service needs no Tapis credentials at
+all. To enable it:
+
+1. Set `TAPIS_ENABLED=1`, `TAPIS_CLIENT_ID`/`TAPIS_CLIENT_KEY` (a registered
+   Tapis OAuth client), and `TAPIS_WORK_BASE` (a directory writable by the
+   execution system's user — required, no default) in `.env`. See
+   `.env.example` for the full list and defaults.
+2. Each web-service user connects their **own** Tapis account from the
+   **Account** page (`/account`) — a standard OAuth `authorization_code`
+   login redirect. The service never sees or stores a password; jobs
+   submitted from a connected session run and are billed under that user's
+   own Tapis identity. A session with no connected account cannot submit
+   jobs.
+3. (Optional, for jobs with no connected owner — e.g. re-attached on a
+   restart) seed a *shared* fallback credential once via
+   `TAPIS_REFRESH_TOKEN`, or call
+   `tapis_service.bootstrap_refresh_token(username, password)` a single
+   time — the password is not needed again afterward, and Tapis rotates the
+   refresh token on every use, so the current one lives in the database, not
+   the environment.
+
+Datasets must already exist on the execution system — see `remote_path` in
+`src/web/config.py`; this container's own dataset paths mean nothing there,
+and uploaded datasets are rejected for remote training by design.
+
 ## Persist data across container restarts
 `docker compose down` stops containers but keeps the named volumes (Postgres data,
 object storage, dataset uploads/checkpoints) — `docker compose up` afterward picks up
@@ -118,12 +150,14 @@ than an expensive training loop.
    the best-scoring candidates per latency bucket, until a full architecture (stem →
    4 stages → classifier head) is assembled under budget.
 2. **Train** — the original recipe (auto_augment, random_erase, mixup, label smoothing,
-   cosine LR with warmup) trains the selected architecture. In the current web service,
-   this step is a fast stub for demo/deployment-validation purposes (real GPU-backed
-   training submission is in progress); the CLI (`src.pipeline.auto_nas`) always runs
-   full training.
-3. **Export** — the trained (or freshly-initialized, in demo mode) model is traced and
-   saved as a TorchScript `.pt` file.
+   cosine LR with warmup) trains the selected architecture. The CLI
+   (`src.pipeline.auto_nas`) trains locally; the web service submits a real job to a
+   Tapis-managed HPC system and polls it to completion (see
+   [Configure remote training](#configure-remote-training-tapis)) — with
+   `TAPIS_ENABLED=0` it instead exports a freshly-initialized (untrained) model, for
+   demo/deployment-validation purposes.
+3. **Export** — the trained (or freshly-initialized, with `TAPIS_ENABLED=0`) model is
+   traced and saved as a TorchScript `.pt` file.
 
 ## Web service architecture
 FastAPI app (`src/web/`), server-rendered Jinja2 templates (no frontend build step),

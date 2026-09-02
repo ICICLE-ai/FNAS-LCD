@@ -45,9 +45,7 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "fnas-lcd-models")
 # works with no credentials.
 TAPIS_ENABLED = os.environ.get("TAPIS_ENABLED", "0") not in ("0", "", "false", "False")
 TAPIS_BASE_URL = os.environ.get("TAPIS_BASE_URL", "https://icicleai.tapis.io")
-TAPIS_USERNAME = os.environ.get("TAPIS_USERNAME", "")
-TAPIS_PASSWORD = os.environ.get("TAPIS_PASSWORD", "")
-TAPIS_JWT = os.environ.get("TAPIS_JWT", "")          # alternative to user/password
+TAPIS_JWT = os.environ.get("TAPIS_JWT", "")          # short-lived, script-only alternative
 # Preferred credentials: an OAuth client plus a refresh token, so the service
 # never stores a user's password. Obtain the refresh token once with
 # tapis_service.bootstrap_refresh_token(). Tapis rotates refresh tokens on use,
@@ -151,8 +149,6 @@ class AppSettings:
 
     tapis_enabled: bool = TAPIS_ENABLED
     tapis_base_url: str = TAPIS_BASE_URL
-    tapis_username: str = TAPIS_USERNAME
-    tapis_password: str = TAPIS_PASSWORD
     tapis_jwt: str = TAPIS_JWT
     tapis_client_id: str = TAPIS_CLIENT_ID
     tapis_client_key: str = TAPIS_CLIENT_KEY

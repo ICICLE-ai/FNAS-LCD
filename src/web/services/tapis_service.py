@@ -286,21 +286,13 @@ def _build_client(tapis_username: Optional[str] = None):
     if settings.tapis_jwt:
         return Tapis(base_url=settings.tapis_base_url, access_token=settings.tapis_jwt)
 
-    # 3. Password grant. Works, but means the service stores a user's password;
-    #    prefer (1) and run bootstrap_refresh_token() to get there.
-    if not settings.tapis_username or not settings.tapis_password:
-        raise TapisNotConfigured(
-            "Tapis credentials missing. Provide TAPIS_CLIENT_ID + "
-            "TAPIS_CLIENT_KEY (+ a bootstrapped refresh token), or TAPIS_JWT, "
-            "or TAPIS_USERNAME/TAPIS_PASSWORD. Set TAPIS_ENABLED=0 to run "
-            "without remote training."
-        )
-
-    t = Tapis(base_url=settings.tapis_base_url,
-              username=settings.tapis_username,
-              password=settings.tapis_password)
-    t.get_tokens()
-    return t
+    raise TapisNotConfigured(
+        "Tapis credentials missing. Provide TAPIS_CLIENT_ID + TAPIS_CLIENT_KEY "
+        "(+ a bootstrapped refresh token), or TAPIS_JWT. Set TAPIS_ENABLED=0 "
+        "to run without remote training. The service never stores a user "
+        "password -- see bootstrap_refresh_token() for the shared credential, "
+        "or /auth/tapis/login for a per-user one."
+    )
 
 
 def get_client(tapis_username: Optional[str] = None, force_refresh: bool = False):
