@@ -50,8 +50,6 @@ services:
       # without credentials; set TAPIS_ENABLED=1 in .env to submit real jobs.
       TAPIS_ENABLED: ${TAPIS_ENABLED:-0}
       TAPIS_BASE_URL: ${TAPIS_BASE_URL:-https://icicleai.tapis.io}
-      TAPIS_USERNAME: ${TAPIS_USERNAME:-}
-      TAPIS_PASSWORD: ${TAPIS_PASSWORD:-}
       TAPIS_JWT: ${TAPIS_JWT:-}
       TAPIS_CLIENT_ID: ${TAPIS_CLIENT_ID:-}
       TAPIS_CLIENT_KEY: ${TAPIS_CLIENT_KEY:-}
