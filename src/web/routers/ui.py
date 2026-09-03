@@ -31,24 +31,30 @@ def _get_device_configs(conn) -> list:
     return conn.execute("SELECT * FROM device_configs ORDER BY id").fetchall()
 
 
-def _get_jobs(conn, status=None, limit=50):
+def _get_jobs(conn, tapis_username, status=None, limit=50):
+    # tapis_username=None (no connected account) matches nothing -- SQL's
+    # `= NULL` is never true, so this naturally returns zero rows rather
+    # than needing a special case.
     if status:
         return conn.execute(
             "SELECT jobs.*, datasets.name AS dataset_name FROM jobs "
             "LEFT JOIN datasets ON datasets.id = jobs.dataset_id "
-            "WHERE jobs.status=%s ORDER BY jobs.id DESC LIMIT %s",
-            (status, limit),
+            "WHERE jobs.status=%s AND jobs.submitted_by=%s "
+            "ORDER BY jobs.id DESC LIMIT %s",
+            (status, tapis_username, limit),
         ).fetchall()
     return conn.execute(
         "SELECT jobs.*, datasets.name AS dataset_name FROM jobs "
         "LEFT JOIN datasets ON datasets.id = jobs.dataset_id "
-        "ORDER BY jobs.id DESC LIMIT %s", (limit,)
+        "WHERE jobs.submitted_by=%s ORDER BY jobs.id DESC LIMIT %s",
+        (tapis_username, limit),
     ).fetchall()
 
 
-def _job_stats(conn) -> dict:
+def _job_stats(conn, tapis_username) -> dict:
     rows = conn.execute(
-        "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status"
+        "SELECT status, COUNT(*) as cnt FROM jobs WHERE submitted_by=%s GROUP BY status",
+        (tapis_username,),
     ).fetchall()
     stats = {r["status"]: r["cnt"] for r in rows}
     return {
@@ -64,24 +70,28 @@ def _job_stats(conn) -> dict:
 # ── pages ──────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def index(request: Request, submitted: int | None = Query(None)):
+def index(request: Request, response: Response, submitted: int | None = Query(None),
+          session: dict = Depends(get_session)):
+    tapis_username = session.get("tapis_username")
     with get_db() as conn:
         ds_count = conn.execute("SELECT COUNT(*) AS count FROM datasets WHERE is_ready=1").fetchone()["count"]
-        stats = _job_stats(conn)
+        stats = _job_stats(conn, tapis_username)
         recent = conn.execute(
             "SELECT jobs.*, datasets.name AS dataset_name FROM jobs "
             "LEFT JOIN datasets ON datasets.id = jobs.dataset_id "
-            "ORDER BY jobs.id DESC LIMIT 10"
+            "WHERE jobs.submitted_by=%s ORDER BY jobs.id DESC LIMIT 10",
+            (tapis_username,),
         ).fetchall()
     recent_jobs = [_row_to_job(r) for r in recent]
     active = {"pending", "searching", "training", "exporting"}
-    return templates.TemplateResponse(request, "index.html", {
+    page = templates.TemplateResponse(request, "index.html", {
         "dataset_count": ds_count,
         "stats": stats,
         "recent_jobs": recent_jobs,
         "has_active": any(j.status in active for j in recent_jobs),
         "submitted": submitted,
     })
+    return apply_session_cookie(response, page)
 
 
 # ── datasets ───────────────────────────────────────────────────────────────
@@ -212,18 +222,21 @@ def search_run(
 # ── jobs ───────────────────────────────────────────────────────────────────
 
 @router.get("/jobs", response_class=HTMLResponse)
-def jobs_page(request: Request, status: str | None = Query(None)):
+def jobs_page(request: Request, response: Response, status: str | None = Query(None),
+              session: dict = Depends(get_session)):
+    tapis_username = session.get("tapis_username")
     with get_db() as conn:
-        jobs = _get_jobs(conn, status=status)
-        stats = _job_stats(conn)
+        jobs = _get_jobs(conn, tapis_username, status=status)
+        stats = _job_stats(conn, tapis_username)
     job_list = [_row_to_job(j) for j in jobs]
     active = {"pending", "searching", "training", "exporting"}
-    return templates.TemplateResponse(request, "jobs.html", {
+    page = templates.TemplateResponse(request, "jobs.html", {
         "jobs": job_list,
         "has_active": any(j.status in active for j in job_list),
         "stats": stats,
         "filter_status": status or "",
     })
+    return apply_session_cookie(response, page)
 
 
 @router.get("/account", response_class=HTMLResponse)
@@ -235,13 +248,18 @@ def account_page(request: Request, response: Response, session: dict = Depends(g
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_detail(request: Request, job_id: int):
+def job_detail(request: Request, job_id: int, response: Response,
+               session: dict = Depends(get_session)):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
-        if row is None:
+        # 404, not 403, for someone else's job -- don't reveal that a given
+        # id belongs to another user.
+        if row is None or not session.get("tapis_username") \
+                or row["submitted_by"] != session["tapis_username"]:
             raise HTTPException(404, "Job not found")
         ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (row["dataset_id"],)).fetchone()
-    return templates.TemplateResponse(request, "job_detail.html", {
+    page = templates.TemplateResponse(request, "job_detail.html", {
         "job": _row_to_job(row),
         "dataset": _row_to_dataset(ds) if ds else None,
     })
+    return apply_session_cookie(response, page)
