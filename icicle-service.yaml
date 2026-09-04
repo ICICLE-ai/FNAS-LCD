@@ -13,7 +13,7 @@ project-name: fnas-lcd
 # TODO
 service-type: ai
 
-pod-name: fnas-lcd
+pod-name: fnaslcd
 
 # ──────────────────────────────────────────────────────────────────────
 # Runtime Configuration
