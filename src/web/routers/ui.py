@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..database import get_db
-from ..deps import apply_session_cookie, get_session
+from ..deps import apply_session_cookie, get_session, get_tapis_token
 from .api import _row_to_dataset, _row_to_job
 from ..services import dataset_service
 
@@ -175,6 +175,7 @@ def search_run(
     device_type: str = Form(...),
     budget: float = Form(...),
     session: dict = Depends(get_session),
+    tapis_token: str | None = Depends(get_tapis_token),
 ):
     """Submit a job: search + export run in the background (demo: training
     is skipped). Redirects home with a 'submitted' flash; track progress
@@ -206,6 +207,7 @@ def search_run(
             device_type=device_type,
             budget=budget,
             submitted_by=session["tapis_username"],
+            access_token=tapis_token,
         )
     except ValueError as e:
         page = templates.TemplateResponse(request, "search.html", {

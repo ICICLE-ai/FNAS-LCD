@@ -78,10 +78,31 @@ _STATIC = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
 # ── routers ────────────────────────────────────────────────────────────────
+from fastapi import Depends, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from web.deps import AuthRequired, require_login
 from web.routers import api, auth, ui
 
-app.include_router(ui.router)    # HTML pages (no prefix)
-app.include_router(api.router)   # JSON API (/api prefix)
+
+@app.exception_handler(AuthRequired)
+async def _auth_required(request: Request, exc: AuthRequired):
+    if request.url.path.startswith("/api"):
+        return JSONResponse({"detail": exc.message}, status_code=401)
+    import html
+    return HTMLResponse(
+        f"<!doctype html><title>Login required</title>"
+        f"<body style='font-family:system-ui;max-width:32rem;margin:4rem auto'>"
+        f"<h1>Login required</h1><p>{html.escape(exc.message)}</p></body>",
+        status_code=401,
+    )
+
+
+# /health and /static are registered on `app` directly, above, so they stay
+# open. The OAuth routes are the non-token way in and are left ungated.
+_gate = [Depends(require_login)]
+app.include_router(ui.router, dependencies=_gate)    # HTML pages (no prefix)
+app.include_router(api.router, dependencies=_gate)   # JSON API (/api prefix)
 app.include_router(auth.router)  # Tapis OAuth account-connection routes
 
 

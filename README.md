@@ -122,6 +122,15 @@ all. To enable it:
    refresh token on every use, so the current one lives in the database, not
    the environment.
 
+**Hosted behind a login portal (e.g. an ICICLE pod).** If the platform
+logs users in and passes their Tapis token to the app as an `X-Tapis-Token`
+cookie, set `REQUIRE_TAPIS_TOKEN=1`. Every page and API route except
+`/health` and `/static` then requires a valid token (checked against Tapis),
+the token identifies the user, and jobs are submitted with it directly — no
+separate "connect your account" step. Leave it `0` (the default) for local
+use, where there is no portal to supply the cookie and the Account-page flow
+above applies instead.
+
 Datasets must already exist on the execution system — see `remote_path` in
 `src/web/config.py`; this container's own dataset paths mean nothing there,
 and uploaded datasets are rejected for remote training by design.

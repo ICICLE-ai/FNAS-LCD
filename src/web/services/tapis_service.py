@@ -312,13 +312,26 @@ def get_client(tapis_username: Optional[str] = None, force_refresh: bool = False
         return _clients[tapis_username]
 
 
-def _call(fn_name: str, tapis_username: Optional[str] = None, **kwargs):
+def _call(fn_name: str, tapis_username: Optional[str] = None,
+          access_token: Optional[str] = None, **kwargs):
     """Invoke a jobs API method, retrying once with a fresh token on failure.
 
-    tapipy surfaces auth failures as assorted exception types depending on the
-    layer that rejects, so rather than pattern-matching messages we simply
-    retry once with a new session; a genuine error fails the same way twice.
+    `access_token`, when given, takes priority: build a one-off client
+    directly from it (no cache, no stored credential, no retry -- there is
+    nothing to refresh a bare token to). This is for a token the caller
+    already holds (e.g. one supplied by the caller's own session), as
+    opposed to `tapis_username`, which looks up a token this service
+    persists and rotates itself.
+
+    Otherwise, tapipy surfaces auth failures as assorted exception types
+    depending on the layer that rejects, so rather than pattern-matching
+    messages we simply retry once with a new session; a genuine error fails
+    the same way twice.
     """
+    if access_token is not None:
+        from tapipy.tapis import Tapis
+        client = Tapis(base_url=settings.tapis_base_url, access_token=access_token)
+        return getattr(client.jobs, fn_name)(**kwargs)
     try:
         return getattr(get_client(tapis_username).jobs, fn_name)(**kwargs)
     except Exception:
@@ -442,54 +455,63 @@ def build_job_body(
     return body
 
 
-def submit_training(*, tapis_username: Optional[str] = None, **kwargs) -> str:
+def submit_training(*, tapis_username: Optional[str] = None,
+                    access_token: Optional[str] = None, **kwargs) -> str:
     """Submit a training job. Returns the Tapis job UUID.
 
     `tapis_username=None` submits under the shared service account (default,
     unchanged behavior); a given username submits under that user's own
-    connected Tapis identity instead.
+    connected Tapis identity instead. `access_token`, when given, takes
+    priority over both -- see `_call`.
     """
     body = build_job_body(**kwargs)
-    resp = _call("submitJob", tapis_username=tapis_username, **body)
+    resp = _call("submitJob", tapis_username=tapis_username, access_token=access_token, **body)
     return resp.uuid
 
 
 # ── monitor ────────────────────────────────────────────────────────────────
 
-def get_status(uuid: str, tapis_username: Optional[str] = None) -> str:
-    return _call("getJobStatus", tapis_username=tapis_username, jobUuid=uuid).status
+def get_status(uuid: str, tapis_username: Optional[str] = None,
+               access_token: Optional[str] = None) -> str:
+    return _call("getJobStatus", tapis_username=tapis_username,
+                 access_token=access_token, jobUuid=uuid).status
 
 
-def get_last_message(uuid: str, tapis_username: Optional[str] = None) -> str:
+def get_last_message(uuid: str, tapis_username: Optional[str] = None,
+                     access_token: Optional[str] = None) -> str:
     try:
-        return _call("getJob", tapis_username=tapis_username, jobUuid=uuid).lastMessage or ""
+        return _call("getJob", tapis_username=tapis_username,
+                     access_token=access_token, jobUuid=uuid).lastMessage or ""
     except Exception:  # noqa: BLE001 - diagnostics only
         return ""
 
 
-def cancel(uuid: str, tapis_username: Optional[str] = None) -> None:
-    _call("cancelJob", tapis_username=tapis_username, jobUuid=uuid)
+def cancel(uuid: str, tapis_username: Optional[str] = None,
+          access_token: Optional[str] = None) -> None:
+    _call("cancelJob", tapis_username=tapis_username, access_token=access_token, jobUuid=uuid)
 
 
 # ── outputs ────────────────────────────────────────────────────────────────
 
-def list_outputs(uuid: str, tapis_username: Optional[str] = None) -> list[str]:
+def list_outputs(uuid: str, tapis_username: Optional[str] = None,
+                 access_token: Optional[str] = None) -> list[str]:
     """Names of files in the job's output directory (empty on failure)."""
     try:
         # The API path is /output/list/{outputPath} and outputPath must end
         # with '/'; it is relative to the job's output directory.
         listing = _call("getJobOutputList", tapis_username=tapis_username,
-                        jobUuid=uuid, outputPath="/")
+                        access_token=access_token, jobUuid=uuid, outputPath="/")
     except Exception:  # noqa: BLE001
         return []
     return [getattr(f, "name", str(f)) for f in listing]
 
 
-def download_output(uuid: str, name: str, tapis_username: Optional[str] = None) -> Optional[bytes]:
+def download_output(uuid: str, name: str, tapis_username: Optional[str] = None,
+                    access_token: Optional[str] = None) -> Optional[bytes]:
     """Fetch one output file. Returns None if it is absent or unreadable."""
     try:
         data = _call("getJobOutputDownload", tapis_username=tapis_username,
-                     jobUuid=uuid, outputPath=name)
+                     access_token=access_token, jobUuid=uuid, outputPath=name)
     except Exception:  # noqa: BLE001
         return None
     if isinstance(data, str):

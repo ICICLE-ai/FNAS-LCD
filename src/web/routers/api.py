@@ -9,7 +9,7 @@ from fastapi.responses import Response
 
 from ..config import settings
 from ..database import get_db
-from ..deps import apply_session_cookie, get_session
+from ..deps import apply_session_cookie, get_session, get_tapis_token
 from ..services import storage_service
 from ..models import (
     DatasetListResponse,
@@ -194,15 +194,21 @@ def run_search(req: SearchRequest):
 # ── jobs stub (full impl in Phase 4) ───────────────────────────────────────
 
 @router.post("/jobs", response_model=JobResponse)
-def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
+def create_job(req: JobCreateRequest, session: dict = Depends(get_session),
+               tapis_token: str | None = Depends(get_tapis_token)):
     """Create and start a training job.
 
-    Requires a connected Tapis account (see /account) -- jobs always run
-    under the identity that submitted them, never a shared fallback account.
+    Requires a Tapis identity -- either a pass-through token the caller
+    already holds (e.g. injected by a hosting platform; takes priority when
+    present), or a connected account via /account -- jobs always run under
+    the identity that submitted them, never a shared fallback account.
     """
     from ..services.job_manager import job_manager
 
-    if not session.get("tapis_username"):
+    # `session` already reflects a validated pass-through token, if one was
+    # sent (see deps.get_session), so this covers both ways of identifying.
+    submitted_by = session.get("tapis_username")
+    if not submitted_by:
         raise HTTPException(
             403, "Connect your Tapis account (GET /account) before submitting a job."
         )
@@ -230,7 +236,8 @@ def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
             gpu=req.gpu,
             max_iters=req.max_iters,
             structure_str=req.structure_str,
-            submitted_by=session["tapis_username"],
+            submitted_by=submitted_by,
+            access_token=tapis_token,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
