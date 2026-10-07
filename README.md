@@ -173,8 +173,9 @@ FastAPI app (`src/web/`), server-rendered Jinja2 templates (no frontend build st
 Postgres for job/dataset metadata, S3-compatible object storage for exported models
 (MinIO locally; a config change, not a code change, points it at real S3/ICICLE
 storage later). Jobs run in a background thread per submission, with the UI polling
-`/api/jobs/{id}/status` every second for live updates. See `docs/` for the ICICLE
-deployment requirements and target architecture in more detail.
+`/api/jobs/{id}/status` every second for live updates. See
+`docs/architecture.md` for the target architecture in more detail, and
+`docs/deployment.md` for ICICLE deployment requirements and status.
 
 ## Repository layout
 - `src/pipeline/` — CLI entrypoints (`auto_nas.py`, `interactive.py`)
@@ -185,6 +186,7 @@ deployment requirements and target architecture in more detail.
 - `src/web/` — the FastAPI web service (UI + JSON API)
 - `data/block_lookup/` — precomputed per-block cost/score lookup table
 - `data/toy_dataset/` — small bundled ImageFolder dataset for smoke testing
-- `docs/` — ICICLE deployment requirements and architecture notes
+- `docs/architecture.md` — target architecture and identity model
+- `docs/deployment.md` — ICICLE deployment requirements and current status
 
 ---

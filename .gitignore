@@ -12,7 +12,8 @@ __pycache__/
 !.env.example
 
 # Working notes from development sessions — local scratch, not project docs.
-*.md
+# Root-level only: docs/*.md (and README.md) are real, committed project docs.
+/*.md
 
 # Web service runtime data
 src/web/fnas_lcd.db
