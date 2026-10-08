@@ -354,6 +354,7 @@ def build_job_body(
     warmup: Optional[int] = None,
     max_minutes: Optional[int] = None,
     stage_mode: Optional[str] = None,
+    submitted_by: Optional[str] = None,
 ) -> dict:
     """Assemble a Tapis job request.
 
@@ -441,7 +442,10 @@ def build_job_body(
         "name": name,
         "appId": settings.tapis_app_id,
         "appVersion": settings.tapis_app_version,
-        "description": f"FNAS-LCD training ({num_classes} classes)",
+        # Attribution independent of our own database -- so a job's
+        # submitter is visible from Tapis's own records too, not only ours.
+        "description": f"FNAS-LCD training ({num_classes} classes)"
+                       + (f" -- submitted via fnas-lcd by {submitted_by}" if submitted_by else ""),
         "maxMinutes": max_minutes or settings.tapis_max_minutes,
         "execSystemInputDir": job_dir,
         "execSystemExecDir": job_dir,
@@ -462,9 +466,11 @@ def submit_training(*, tapis_username: Optional[str] = None,
     `tapis_username=None` submits under the shared service account (default,
     unchanged behavior); a given username submits under that user's own
     connected Tapis identity instead. `access_token`, when given, takes
-    priority over both -- see `_call`.
+    priority over both -- see `_call`. Either way, `tapis_username` is also
+    recorded on the Tapis job itself (its description), so attribution is
+    visible from Tapis's own records, not just our database.
     """
-    body = build_job_body(**kwargs)
+    body = build_job_body(submitted_by=tapis_username, **kwargs)
     resp = _call("submitJob", tapis_username=tapis_username, access_token=access_token, **body)
     return resp.uuid
 
