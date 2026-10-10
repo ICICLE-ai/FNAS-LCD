@@ -9,7 +9,7 @@ from fastapi.responses import Response
 
 from ..config import settings
 from ..database import get_db
-from ..deps import get_session
+from ..deps import apply_session_cookie, get_session, get_tapis_token
 from ..services import storage_service
 from ..models import (
     DatasetListResponse,
@@ -194,15 +194,21 @@ def run_search(req: SearchRequest):
 # ── jobs stub (full impl in Phase 4) ───────────────────────────────────────
 
 @router.post("/jobs", response_model=JobResponse)
-def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
+def create_job(req: JobCreateRequest, session: dict = Depends(get_session),
+               tapis_token: str | None = Depends(get_tapis_token)):
     """Create and start a training job.
 
-    Requires a connected Tapis account (see /account) -- jobs always run
-    under the identity that submitted them, never a shared fallback account.
+    Requires a Tapis identity -- either a pass-through token the caller
+    already holds (e.g. injected by a hosting platform; takes priority when
+    present), or a connected account via /account -- jobs always run under
+    the identity that submitted them, never a shared fallback account.
     """
     from ..services.job_manager import job_manager
 
-    if not session.get("tapis_username"):
+    # `session` already reflects a validated pass-through token, if one was
+    # sent (see deps.get_session), so this covers both ways of identifying.
+    submitted_by = session.get("tapis_username")
+    if not submitted_by:
         raise HTTPException(
             403, "Connect your Tapis account (GET /account) before submitting a job."
         )
@@ -230,7 +236,8 @@ def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
             gpu=req.gpu,
             max_iters=req.max_iters,
             structure_str=req.structure_str,
-            submitted_by=session["tapis_username"],
+            submitted_by=submitted_by,
+            access_token=tapis_token,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -243,45 +250,60 @@ def list_jobs(
     status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    session: dict = Depends(get_session),
 ):
+    tapis_username = session.get("tapis_username")
     with get_db() as conn:
         if status:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE status=%s ORDER BY id DESC LIMIT %s OFFSET %s",
-                (status, limit, offset),
+                "SELECT * FROM jobs WHERE status=%s AND submitted_by=%s "
+                "ORDER BY id DESC LIMIT %s OFFSET %s",
+                (status, tapis_username, limit, offset),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM jobs ORDER BY id DESC LIMIT %s OFFSET %s",
-                (limit, offset),
+                "SELECT * FROM jobs WHERE submitted_by=%s ORDER BY id DESC LIMIT %s OFFSET %s",
+                (tapis_username, limit, offset),
             ).fetchall()
     return JobListResponse(jobs=[_row_to_job(r) for r in rows])
 
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: int):
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
-    if row is None:
+def _owned_job_row(conn, job_id: int, session: dict):
+    """Fetch a job row, but only if the current session actually owns it.
+
+    404 rather than 403 for someone else's job -- don't reveal that a given
+    id belongs to another user.
+    """
+    row = conn.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
+    if row is None or not session.get("tapis_username") \
+            or row["submitted_by"] != session["tapis_username"]:
         raise HTTPException(404, "Job not found")
+    return row
+
+
+@router.get("/jobs/{job_id}", response_model=JobResponse)
+def get_job(job_id: int, session: dict = Depends(get_session)):
+    with get_db() as conn:
+        row = _owned_job_row(conn, job_id, session)
     return _row_to_job(row)
 
 
 @router.get("/jobs/{job_id}/status", response_model=JobStatusResponse)
-def get_job_status(job_id: int):
+def get_job_status(job_id: int, session: dict = Depends(get_session)):
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT id, status, best_val_acc, error_message FROM jobs WHERE id=%s",
-            (job_id,),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(404, "Job not found")
-    return JobStatusResponse(**dict(row))
+        row = _owned_job_row(conn, job_id, session)
+    return JobStatusResponse(
+        id=row["id"], status=row["status"],
+        best_val_acc=row["best_val_acc"], error_message=row["error_message"],
+    )
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=MessageResponse)
-def cancel_job(job_id: int):
+def cancel_job(job_id: int, session: dict = Depends(get_session)):
     from ..services.job_manager import job_manager
+
+    with get_db() as conn:
+        _owned_job_row(conn, job_id, session)
 
     success = job_manager.cancel(job_id)
     if success:
@@ -293,11 +315,9 @@ def cancel_job(job_id: int):
 # ── download ───────────────────────────────────────────────────────────────
 
 @router.get("/download/{job_id}")
-def download_model(job_id: int):
+def download_model(job_id: int, response: Response, session: dict = Depends(get_session)):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "Job not found")
+        row = _owned_job_row(conn, job_id, session)
     if row["status"] != "completed":
         raise HTTPException(400, f"Job is not completed (status: {row['status']})")
 
@@ -307,8 +327,9 @@ def download_model(job_id: int):
 
     filename = Path(object_key).name
     data = storage_service.download_object(object_key)
-    return Response(
+    download = Response(
         content=data,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+    return apply_session_cookie(response, download)

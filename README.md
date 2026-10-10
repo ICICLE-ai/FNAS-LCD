@@ -122,6 +122,15 @@ all. To enable it:
    refresh token on every use, so the current one lives in the database, not
    the environment.
 
+**Hosted behind a login portal (e.g. an ICICLE pod).** If the platform
+logs users in and passes their Tapis token to the app as an `X-Tapis-Token`
+cookie, set `REQUIRE_TAPIS_TOKEN=1`. Every page and API route except
+`/health` and `/static` then requires a valid token (checked against Tapis),
+the token identifies the user, and jobs are submitted with it directly — no
+separate "connect your account" step. Leave it `0` (the default) for local
+use, where there is no portal to supply the cookie and the Account-page flow
+above applies instead.
+
 Datasets must already exist on the execution system — see `remote_path` in
 `src/web/config.py`; this container's own dataset paths mean nothing there,
 and uploaded datasets are rejected for remote training by design.
@@ -164,8 +173,9 @@ FastAPI app (`src/web/`), server-rendered Jinja2 templates (no frontend build st
 Postgres for job/dataset metadata, S3-compatible object storage for exported models
 (MinIO locally; a config change, not a code change, points it at real S3/ICICLE
 storage later). Jobs run in a background thread per submission, with the UI polling
-`/api/jobs/{id}/status` every second for live updates. See `docs/` for the ICICLE
-deployment requirements and target architecture in more detail.
+`/api/jobs/{id}/status` every second for live updates. See
+`docs/architecture.md` for the target architecture in more detail, and
+`docs/deployment.md` for ICICLE deployment requirements and status.
 
 ## Repository layout
 - `src/pipeline/` — CLI entrypoints (`auto_nas.py`, `interactive.py`)
@@ -176,6 +186,7 @@ deployment requirements and target architecture in more detail.
 - `src/web/` — the FastAPI web service (UI + JSON API)
 - `data/block_lookup/` — precomputed per-block cost/score lookup table
 - `data/toy_dataset/` — small bundled ImageFolder dataset for smoke testing
-- `docs/` — ICICLE deployment requirements and architecture notes
+- `docs/architecture.md` — target architecture and identity model
+- `docs/deployment.md` — ICICLE deployment requirements and current status
 
 ---

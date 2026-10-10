@@ -1,0 +1,51 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime
+
+# RECONSTRUCTED, NOT THE ORIGINAL BUILD FILE.
+#
+# The real trainer.def used to build the trainer.sif that
+# fnas-lcd-train:0.1.3 actually points at
+# (/fs/ess/PAS2699/jhyan/fnas-sif-build/trainer.sif) could not be found on
+# any machine or in any backup as of 2026-10-07. This is a best-effort
+# rebuild from what's independently verifiable:
+#   - The Tapis App definition's appArgs/containerArgs (tapis/fnas-lcd-train-0.1.3.app.json)
+#     -- the exact CLI invocation and flags the container must accept.
+#   - This repo's own src/training/timm_trainer.py and src/utils/global_utils.py
+#     -- confirms every flag in appArgs is real and where it's parsed.
+#   - torch==2.13.0, pinned in uv.lock, and the sm_50-sm_90 architecture
+#     range noted in earlier session notes -- hence cu126 above, matching
+#     what was actually observed running.
+#   - runtime: SINGULARITY and the --nv / --bind $PWD:/workspace
+#     containerArgs in the App definition, confirming Apptainer/Singularity,
+#     GPU passthrough, and a working-directory bind mount.
+#
+# NOT verified: the exact base image tag, exact system package list, and
+# whether anything beyond this repo's own source was baked in. Build and
+# smoke-test this before trusting it for a real Vista job -- see the
+# verification note in tapis/README.md.
+
+%files
+    # Mirrors this repo's own training-relevant source into the image, at
+    # the path the App definition's --arch argument expects
+    # (/opt/fnas/src/model/Masternet.py:MasterNet).
+    ../src /opt/fnas/src
+    ../data/block_lookup /opt/fnas/data/block_lookup
+
+%post
+    pip install --no-cache-dir \
+        numpy>=1.23 \
+        timm>=0.9 \
+        tqdm
+
+%environment
+    export PYTHONPATH=/opt/fnas:$PYTHONPATH
+
+%runscript
+    # appArgs from the Tapis App definition are passed straight through.
+    # --export is baked into every run (INCLUDE_BY_DEFAULT): the App always
+    # asks for an exported model, not just a checkpoint.
+    exec python3 /opt/fnas/src/training/timm_trainer.py "$@"
+
+%labels
+    Reconstruction.date 2026-10-07
+    Reconstruction.source "Tapis App definition + repo source, original trainer.def not recovered"

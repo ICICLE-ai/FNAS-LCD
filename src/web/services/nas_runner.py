@@ -119,7 +119,8 @@ def _load_job(job_id: int) -> dict | None:
 
 def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
                          save_dir: Path, output_path: Path,
-                         submitted_by: str | None = None) -> float | None:
+                         submitted_by: str | None = None,
+                         access_token: str | None = None) -> float | None:
     """Retrieve the trained model from a finished Tapis job.
 
     Prefers a TorchScript model exported by the training job itself, which
@@ -129,7 +130,7 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
 
     `submitted_by` selects which Tapis identity to download the outputs as
     (must match whoever the job was submitted under) — None uses the shared
-    service account.
+    service account. `access_token`, when given, is used directly instead.
 
     Returns the best validation accuracy if the job reported it.
     """
@@ -137,12 +138,14 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
 
     from . import tapis_service
 
-    available = tapis_service.list_outputs(uuid, tapis_username=submitted_by)
+    available = tapis_service.list_outputs(uuid, tapis_username=submitted_by,
+                                            access_token=access_token)
 
     # Preferred: the job exported a ready-to-serve model.
     if tapis_service.MODEL_FILE in available:
         data = tapis_service.download_output(uuid, tapis_service.MODEL_FILE,
-                                              tapis_username=submitted_by)
+                                              tapis_username=submitted_by,
+                                              access_token=access_token)
         if data:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(data)
@@ -151,7 +154,8 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
     else:
         # Fallback: raw checkpoint -> rebuild + trace locally.
         data = tapis_service.download_output(uuid, tapis_service.CHECKPOINT_FILE,
-                                              tapis_username=submitted_by)
+                                              tapis_username=submitted_by,
+                                              access_token=access_token)
         if not data:
             raise RuntimeError(
                 f"training job {uuid} produced neither {tapis_service.MODEL_FILE} "
@@ -168,7 +172,8 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
 
     # Metrics are optional: older training containers do not emit them.
     metrics = tapis_service.download_output(uuid, tapis_service.METRICS_FILE,
-                                             tapis_username=submitted_by)
+                                             tapis_username=submitted_by,
+                                             access_token=access_token)
     if not metrics:
         return None
     try:
@@ -189,9 +194,14 @@ def _fail(job_id: int, message: str) -> None:
     )
 
 
-def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) -> str | None:
+def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event,
+                         access_token: str | None = None) -> str | None:
     """Submit a Tapis training job and wait for it. Returns the job UUID, or
-    None if it failed (in which case the job row is already marked failed)."""
+    None if it failed (in which case the job row is already marked failed).
+
+    `access_token`, when given, is used directly for every Tapis call
+    instead of `submitted_by`'s stored credential -- see
+    `tapis_service._call`."""
     from . import tapis_service
 
     conn = get_connection()
@@ -223,6 +233,7 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
         try:
             uuid = tapis_service.submit_training(
                 tapis_username=submitted_by,
+                access_token=access_token,
                 name=f"fnas-lcd-job-{job_id}",
                 structure_str=job["structure_str"],
                 num_classes=ds_row["num_classes"],
@@ -245,13 +256,14 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
     while True:
         if cancel_event.is_set():
             try:
-                tapis_service.cancel(uuid, tapis_username=submitted_by)
+                tapis_service.cancel(uuid, tapis_username=submitted_by, access_token=access_token)
             except Exception:  # noqa: BLE001
                 pass
             return None
 
         try:
-            state = tapis_service.get_status(uuid, tapis_username=submitted_by)
+            state = tapis_service.get_status(uuid, tapis_username=submitted_by,
+                                             access_token=access_token)
         except Exception as e:  # noqa: BLE001
             _fail(job_id, f"Lost contact with the training job {uuid}: {e}")
             return None
@@ -261,9 +273,10 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
         time.sleep(settings.tapis_poll_seconds)
 
     if state != "FINISHED":
-        detail = tapis_service.get_last_message(uuid, tapis_username=submitted_by) or state
+        detail = tapis_service.get_last_message(uuid, tapis_username=submitted_by,
+                                                 access_token=access_token) or state
         log = tapis_service.download_output(uuid, tapis_service.LOG_FILE,
-                                            tapis_username=submitted_by)
+                                            tapis_username=submitted_by, access_token=access_token)
         if log:
             detail += "\n" + log.decode(errors="replace")[-2000:]
         _fail(job_id, f"Training job {state}: {detail}")
@@ -272,12 +285,14 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
     return uuid
 
 
-def execute_job(job_id: int, cancel_event: threading.Event):
+def execute_job(job_id: int, cancel_event: threading.Event, access_token: str | None = None):
     """Run all steps: search, train, export.
 
     Args:
         job_id: Job row ID.
         cancel_event: Set to signal cancellation.
+        access_token: Pass-through Tapis credential from submission time, if
+            any -- see `job_manager.create_and_start`.
     """
     now = datetime.datetime.now().isoformat()
     _update_status(job_id, status="searching", started_at=now)
@@ -348,7 +363,7 @@ def execute_job(job_id: int, cancel_event: threading.Event):
 
     tapis_uuid = None
     if settings.tapis_enabled:
-        tapis_uuid = _run_remote_training(job_id, job, cancel_event)
+        tapis_uuid = _run_remote_training(job_id, job, cancel_event, access_token=access_token)
         if tapis_uuid is None:
             return  # failure already recorded
     else:
@@ -390,7 +405,7 @@ def execute_job(job_id: int, cancel_event: threading.Event):
         if tapis_uuid is not None:
             best_val_acc = _fetch_trained_model(
                 tapis_uuid, structure_str, num_classes, save_dir, local_output_path,
-                submitted_by=job.get("submitted_by"),
+                submitted_by=job.get("submitted_by"), access_token=access_token,
             )
         else:
             _export_fresh_model(

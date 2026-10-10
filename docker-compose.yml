@@ -49,6 +49,7 @@ services:
       # Remote GPU training via Tapis. Defaults to off so the stack comes up
       # without credentials; set TAPIS_ENABLED=1 in .env to submit real jobs.
       TAPIS_ENABLED: ${TAPIS_ENABLED:-0}
+      REQUIRE_TAPIS_TOKEN: ${REQUIRE_TAPIS_TOKEN:-0}
       TAPIS_BASE_URL: ${TAPIS_BASE_URL:-https://icicleai.tapis.io}
       TAPIS_JWT: ${TAPIS_JWT:-}
       TAPIS_CLIENT_ID: ${TAPIS_CLIENT_ID:-}

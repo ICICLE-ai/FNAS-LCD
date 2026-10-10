@@ -39,6 +39,7 @@ class JobManager:
         max_iters: Optional[int] = None,
         structure_str: Optional[str] = None,
         submitted_by: Optional[str] = None,
+        access_token: Optional[str] = None,
     ) -> JobResponse:
         """Create a job row and launch it in a background thread.
 
@@ -46,6 +47,15 @@ class JobManager:
         caller has one (see `deps.get_session`) — persisted on the row so the
         job runs under that user's own Tapis credential rather than the
         shared service account, and so responsibility for the job is known.
+
+        `access_token` is a pass-through Tapis credential the caller already
+        held at submission time (see `deps.get_tapis_token`) -- used directly
+        for this job's submission and, cached in memory only (never in the
+        `jobs` row or any table), for its background tracking too. It does
+        not survive a restart: a job submitted this way that's still running
+        when the service restarts falls back to `submitted_by`'s stored
+        credential on resume, if any, since there's nothing left to recover
+        the original token from.
         """
         import datetime as dt
 
@@ -79,7 +89,7 @@ class JobManager:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, cancel_event),
+            args=(job_id, cancel_event, access_token),
             daemon=True,
             name=f"job-{job_id}",
         )
@@ -163,6 +173,9 @@ class JobManager:
                 cancel_event = threading.Event()
                 self._cancel_events[job_id] = cancel_event
 
+            # No access_token here: a pass-through credential only ever lived
+            # in memory, so a restart loses it regardless. Resumed jobs fall
+            # back to submitted_by's stored credential (_run_job's default).
             thread = threading.Thread(
                 target=self._run_job,
                 args=(job_id, cancel_event),
@@ -175,12 +188,13 @@ class JobManager:
             resumed += 1
         return resumed
 
-    def _run_job(self, job_id: int, cancel_event: threading.Event):
+    def _run_job(self, job_id: int, cancel_event: threading.Event,
+                access_token: Optional[str] = None):
         """Background job worker. Steps: search → train → export."""
         from .nas_runner import execute_job
 
         try:
-            execute_job(job_id, cancel_event)
+            execute_job(job_id, cancel_event, access_token=access_token)
         except Exception:
             # Error already recorded by execute_job
             pass

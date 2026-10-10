@@ -44,6 +44,11 @@ S3_BUCKET = os.environ.get("S3_BUCKET", "fnas-lcd-models")
 # TAPIS_ENABLED=0 the service keeps its local behaviour, so `docker compose up`
 # works with no credentials.
 TAPIS_ENABLED = os.environ.get("TAPIS_ENABLED", "0") not in ("0", "", "false", "False")
+# When hosted behind a platform that logs users in and hands the app their
+# Tapis token as an `X-Tapis-Token` cookie (e.g. an ICICLE pod), require a
+# valid one on every page and API route except /health and /static. Off by
+# default so local `docker compose up` works with no portal in front of it.
+REQUIRE_TAPIS_TOKEN = os.environ.get("REQUIRE_TAPIS_TOKEN", "0") not in ("0", "", "false", "False")
 TAPIS_BASE_URL = os.environ.get("TAPIS_BASE_URL", "https://icicleai.tapis.io")
 TAPIS_JWT = os.environ.get("TAPIS_JWT", "")          # short-lived, script-only alternative
 # Preferred credentials: an OAuth client plus a refresh token, so the service
@@ -148,6 +153,7 @@ class AppSettings:
     s3_bucket: str = S3_BUCKET
 
     tapis_enabled: bool = TAPIS_ENABLED
+    require_tapis_token: bool = REQUIRE_TAPIS_TOKEN
     tapis_base_url: str = TAPIS_BASE_URL
     tapis_jwt: str = TAPIS_JWT
     tapis_client_id: str = TAPIS_CLIENT_ID

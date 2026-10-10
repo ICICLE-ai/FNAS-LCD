@@ -1,0 +1,274 @@
+{
+  "sharedAppCtx": "jinghuayan96",
+  "isPublic": false,
+  "sharedWithUsers": [],
+  "tenant": "icicleai",
+  "id": "fnas-lcd-train",
+  "version": "0.1.3",
+  "description": "FNAS-LCD latency-constrained NAS training (timm_trainer.py)",
+  "owner": "jinghuayan96",
+  "enabled": true,
+  "versionEnabled": true,
+  "locked": false,
+  "runtime": "SINGULARITY",
+  "runtimeVersion": null,
+  "runtimeOptions": [
+    "SINGULARITY_RUN"
+  ],
+  "containerImage": "/fs/ess/PAS2699/jhyan/fnas-sif-build/trainer.sif",
+  "jobType": "BATCH",
+  "maxJobs": 2147483647,
+  "maxJobsPerUser": 2147483647,
+  "strictFileInputs": false,
+  "jobAttributes": {
+    "description": "FNAS-LCD single-GPU training job",
+    "dynamicExecSystem": false,
+    "execSystemConstraints": null,
+    "execSystemId": "pitzer-tapis",
+    "execSystemExecDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}",
+    "execSystemInputDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}",
+    "execSystemOutputDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}/output",
+    "dtnSystemInputDir": "!tapis_not_set",
+    "dtnSystemOutputDir": "!tapis_not_set",
+    "execSystemLogicalQueue": "gpu-exp",
+    "archiveSystemId": "pitzer-tapis",
+    "archiveSystemDir": "/fs/ess/PAS2699/jhyan/tapis-archive/${JobUUID}",
+    "archiveOnAppError": true,
+    "archiveMode": "ALWAYS",
+    "isMpi": false,
+    "mpiCmd": null,
+    "cmdPrefix": null,
+    "parameterSet": {
+      "appArgs": [
+        {
+          "arg": "--model_type zen",
+          "name": "model_type",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--arch /opt/fnas/src/model/Masternet.py:MasterNet",
+          "name": "arch",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--dataset auto_imagefolder",
+          "name": "dataset_kind",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--plainnet_struct 'REPLACE_ME'",
+          "name": "plainnet_struct",
+          "description": null,
+          "inputMode": "REQUIRED",
+          "notes": {}
+        },
+        {
+          "arg": "--num_classes REPLACE_ME",
+          "name": "num_classes",
+          "description": null,
+          "inputMode": "REQUIRED",
+          "notes": {}
+        },
+        {
+          "arg": "--data_dir /workspace/data",
+          "name": "data_dir",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--save_dir /workspace/output",
+          "name": "save_dir",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--summary_file /workspace/output/summary.csv",
+          "name": "summary_file",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--completion_file /workspace/output/train.done",
+          "name": "completion_file",
+          "description": null,
+          "inputMode": "FIXED",
+          "notes": {}
+        },
+        {
+          "arg": "--input_image_size 224",
+          "name": "input_image_size",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--epochs 200",
+          "name": "epochs",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--batch_size 256",
+          "name": "batch_size",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--batch_size_per_gpu 64",
+          "name": "batch_per_gpu",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--workers_per_gpu 8",
+          "name": "workers",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--dist_mode single",
+          "name": "dist_mode",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--gpu 0",
+          "name": "gpu",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--optimizer sgd",
+          "name": "optimizer",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--lr_per_256 0.1 --target_lr_per_256 0.0 --lr_mode cosine --warmup 5",
+          "name": "lr",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--bn_momentum 0.01 --wd 5e-4 --weight_init xavier --nesterov",
+          "name": "regularization",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--label_smoothing --random_erase --mixup --auto_augment",
+          "name": "augmentation",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--img_per_class -1 --frac 1 --epfrac 1 --expid 1 --print_freq 100 --auto_resume",
+          "name": "misc",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--export",
+          "name": "export",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--max_iters 5",
+          "name": "max_iters",
+          "description": null,
+          "inputMode": "INCLUDE_ON_DEMAND",
+          "notes": {}
+        }
+      ],
+      "containerArgs": [
+        {
+          "arg": "--nv",
+          "name": "cuda_support",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--bind $PWD:/workspace",
+          "name": "job_bind",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        }
+      ],
+      "schedulerOptions": [
+        {
+          "arg": "--gpus-per-node=1",
+          "name": "gpu_node",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        },
+        {
+          "arg": "--account=PAS2699",
+          "name": "account_name",
+          "description": null,
+          "inputMode": "INCLUDE_BY_DEFAULT",
+          "notes": {}
+        }
+      ],
+      "envVariables": [],
+      "archiveFilter": {
+        "includes": [],
+        "excludes": [],
+        "includeLaunchFiles": true
+      },
+      "logConfig": {
+        "stdoutFilename": "",
+        "stderrFilename": ""
+      }
+    },
+    "fileInputs": [
+      {
+        "name": "dataset",
+        "description": "ImageFolder root with train/ and val/, staged by copy. OPTIONAL because datasets already on the execution system are bind-mounted instead (Tapis refuses transfers over 10,000 files).",
+        "inputMode": "OPTIONAL",
+        "autoMountLocal": true,
+        "envKey": null,
+        "notes": {},
+        "sourceUrl": null,
+        "targetPath": "data"
+      }
+    ],
+    "fileInputArrays": [],
+    "nodeCount": 1,
+    "coresPerNode": 12,
+    "memoryMB": 65536,
+    "maxMinutes": 1440,
+    "subscriptions": [],
+    "tags": []
+  },
+  "tags": [],
+  "notes": {},
+  "uuid": "fbaf8dda-5d77-4bdf-81ca-c3583209a658",
+  "deleted": false,
+  "created": "2026-08-14T18:32:29.940949Z",
+  "updated": "2026-08-14T18:32:29.940949Z"
+}
