@@ -7,6 +7,7 @@ row in Postgres so the web UI can poll for progress.
 from __future__ import annotations
 
 import datetime
+import re
 import sys
 import threading
 import time
@@ -20,6 +21,14 @@ for _p in (str(_PROJ), str(_PROJ / "model"), str(_PROJ / "utils")):
 
 from ..config import settings
 from ..database import get_connection
+
+
+def _safe_filename_part(name: str | None, fallback: str = "anonymous") -> str:
+    """Sanitize a Tapis username for use in a filename / S3 object key."""
+    if not name:
+        return fallback
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
+    return cleaned or fallback
 
 
 def _write_structure(save_dir: Path, structure_str: str) -> Path:
@@ -234,7 +243,7 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event,
             uuid = tapis_service.submit_training(
                 tapis_username=submitted_by,
                 access_token=access_token,
-                name=f"fnas-lcd-job-{job_id}",
+                name=f"fnas-lcd-{_safe_filename_part(submitted_by)}-job-{job_id}",
                 structure_str=job["structure_str"],
                 num_classes=ds_row["num_classes"],
                 remote_dataset_path=remote_path,
@@ -397,8 +406,10 @@ def execute_job(job_id: int, cancel_event: threading.Event, access_token: str | 
     # Export locally first (models_dir is a transient staging spot), then
     # upload to object storage — the DB's output_path stores the object key,
     # not a local path, once storage-backed download is live everywhere.
-    local_output_path = settings.models_dir / f"job_{job_id}.pt"
-    object_key = f"models/job_{job_id}.pt"
+    submitter = _safe_filename_part(job.get("submitted_by"))
+    model_filename = f"{submitter}_job_{job_id}.pt"
+    local_output_path = settings.models_dir / model_filename
+    object_key = f"models/{model_filename}"
 
     best_val_acc = None
     try:
