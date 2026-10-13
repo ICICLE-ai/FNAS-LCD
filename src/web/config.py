@@ -123,6 +123,18 @@ PRECONFIGURED_DATASETS = [
         "is_ready": 1,
         "description": "Built-in toy dataset (100 classes)",
     },
+    {
+        "name": "Ohio Small Animals",
+        # Remote-only dataset: no local copy ships with this repo, and
+        # none is needed -- `path` is never read from disk for a
+        # pre-configured (non-uploaded) dataset, only `remote_path` is.
+        "path": "/fs/ess/PAS2699/jhyan/datasets/osa_centercropped_224",
+        "remote_path": "/fs/ess/PAS2699/jhyan/datasets/osa_centercropped_224",
+        "num_classes": 100,
+        "is_upload": 0,
+        "is_ready": 1,
+        "description": "Ohio Small Animals (OSA), center-cropped to 224px (100 classes)",
+    },
 ]
 
 
