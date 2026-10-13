@@ -39,23 +39,15 @@ class JobManager:
         max_iters: Optional[int] = None,
         structure_str: Optional[str] = None,
         submitted_by: Optional[str] = None,
-        access_token: Optional[str] = None,
     ) -> JobResponse:
         """Create a job row and launch it in a background thread.
 
         `submitted_by` is the Tapis username of the connected user, when the
-        caller has one (see `deps.get_session`) — persisted on the row so the
-        job runs under that user's own Tapis credential rather than the
-        shared service account, and so responsibility for the job is known.
-
-        `access_token` is a pass-through Tapis credential the caller already
-        held at submission time (see `deps.get_tapis_token`) -- used directly
-        for this job's submission and, cached in memory only (never in the
-        `jobs` row or any table), for its background tracking too. It does
-        not survive a restart: a job submitted this way that's still running
-        when the service restarts falls back to `submitted_by`'s stored
-        credential on resume, if any, since there's nothing left to recover
-        the original token from.
+        caller has one (see `deps.get_session`) — persisted on the row and
+        used for attribution (job name, Tapis description) so responsibility
+        for the job is known. The job itself still runs under the shared
+        service account on Pitzer, under its own work directory -- see
+        `nas_runner._run_remote_training`.
         """
         import datetime as dt
 
@@ -89,7 +81,7 @@ class JobManager:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, cancel_event, access_token),
+            args=(job_id, cancel_event),
             daemon=True,
             name=f"job-{job_id}",
         )
@@ -114,7 +106,7 @@ class JobManager:
         # Check current status
         with get_db() as conn:
             row = conn.execute(
-                "SELECT status, tapis_job_uuid, submitted_by FROM jobs WHERE id=%s",
+                "SELECT status, tapis_job_uuid FROM jobs WHERE id=%s",
                 (job_id,),
             ).fetchone()
         if row is None:
@@ -135,7 +127,7 @@ class JobManager:
         if row["tapis_job_uuid"]:
             try:
                 from .tapis_service import cancel as tapis_cancel
-                tapis_cancel(row["tapis_job_uuid"], tapis_username=row["submitted_by"])
+                tapis_cancel(row["tapis_job_uuid"])
             except Exception as e:  # noqa: BLE001
                 # The local job is still cancelled; surface the remote failure
                 # rather than pretending everything stopped cleanly.
@@ -173,9 +165,6 @@ class JobManager:
                 cancel_event = threading.Event()
                 self._cancel_events[job_id] = cancel_event
 
-            # No access_token here: a pass-through credential only ever lived
-            # in memory, so a restart loses it regardless. Resumed jobs fall
-            # back to submitted_by's stored credential (_run_job's default).
             thread = threading.Thread(
                 target=self._run_job,
                 args=(job_id, cancel_event),
@@ -188,13 +177,12 @@ class JobManager:
             resumed += 1
         return resumed
 
-    def _run_job(self, job_id: int, cancel_event: threading.Event,
-                access_token: Optional[str] = None):
+    def _run_job(self, job_id: int, cancel_event: threading.Event):
         """Background job worker. Steps: search → train → export."""
         from .nas_runner import execute_job
 
         try:
-            execute_job(job_id, cancel_event, access_token=access_token)
+            execute_job(job_id, cancel_event)
         except Exception:
             # Error already recorded by execute_job
             pass
