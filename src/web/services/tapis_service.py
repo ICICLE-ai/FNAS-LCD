@@ -460,17 +460,24 @@ def build_job_body(
 
 
 def submit_training(*, tapis_username: Optional[str] = None,
-                    access_token: Optional[str] = None, **kwargs) -> str:
+                    access_token: Optional[str] = None,
+                    submitted_by: Optional[str] = None, **kwargs) -> str:
     """Submit a training job. Returns the Tapis job UUID.
 
-    `tapis_username=None` submits under the shared service account (default,
-    unchanged behavior); a given username submits under that user's own
-    connected Tapis identity instead. `access_token`, when given, takes
-    priority over both -- see `_call`. Either way, `tapis_username` is also
-    recorded on the Tapis job itself (its description), so attribution is
-    visible from Tapis's own records, not just our database.
+    `tapis_username`/`access_token` select which Tapis identity actually
+    submits and owns the job (`tapis_username=None` is the shared service
+    account, the default). `submitted_by` is recorded on the job's
+    description for attribution only, independent of that -- the two no
+    longer have to match: every job currently runs under the shared service
+    account regardless of who submitted it (see `nas_runner._run_remote_training`),
+    with `submitted_by` kept so attribution is visible from Tapis's own
+    records, not just our database. Falls back to `tapis_username` when not
+    given, for any other caller that still wants the old matching behavior.
     """
-    body = build_job_body(submitted_by=tapis_username, **kwargs)
+    body = build_job_body(
+        submitted_by=submitted_by if submitted_by is not None else tapis_username,
+        **kwargs,
+    )
     resp = _call("submitJob", tapis_username=tapis_username, access_token=access_token, **body)
     return resp.uuid
 

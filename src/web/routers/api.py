@@ -9,7 +9,7 @@ from fastapi.responses import Response
 
 from ..config import settings
 from ..database import get_db
-from ..deps import apply_session_cookie, get_session, get_tapis_token
+from ..deps import apply_session_cookie, get_session
 from ..services import storage_service
 from ..models import (
     DatasetListResponse,
@@ -194,14 +194,15 @@ def run_search(req: SearchRequest):
 # ── jobs stub (full impl in Phase 4) ───────────────────────────────────────
 
 @router.post("/jobs", response_model=JobResponse)
-def create_job(req: JobCreateRequest, session: dict = Depends(get_session),
-               tapis_token: str | None = Depends(get_tapis_token)):
+def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
     """Create and start a training job.
 
     Requires a Tapis identity -- either a pass-through token the caller
     already holds (e.g. injected by a hosting platform; takes priority when
-    present), or a connected account via /account -- jobs always run under
-    the identity that submitted them, never a shared fallback account.
+    present), or a connected account via /account -- so the submitter is
+    known and recorded for attribution. The job itself always runs under
+    the shared service account on Pitzer (see
+    `nas_runner._run_remote_training`), not the submitter's own credential.
     """
     from ..services.job_manager import job_manager
 
@@ -237,7 +238,6 @@ def create_job(req: JobCreateRequest, session: dict = Depends(get_session),
             max_iters=req.max_iters,
             structure_str=req.structure_str,
             submitted_by=submitted_by,
-            access_token=tapis_token,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
