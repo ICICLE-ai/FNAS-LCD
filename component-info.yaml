@@ -12,7 +12,7 @@
   # CONFIRM: license not yet chosen — release guidance says to consult the
   # IP department before picking one. Placeholder URL below assumes the
   # eventual ICICLE-ai repo location.
-  licenseUrl: "https://github.com/ICICLE-ai/FNAS-LCD?tab=License-1-ov-file"  # TODO: real license once chosen
+  licenseUrl: "https://github.com/ICICLE-ai/FNAS-LCD/tree/main?tab=GPL-3.0-1-ov-file"
   publicAccess: true  # CONFIRM
   sourceCodeUrl: "https://github.com/ICICLE-ai/FNAS-LCD" 
   codeReviewConducted: false  # CONFIRM — no formal review has happened yet
