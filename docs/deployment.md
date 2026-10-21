@@ -39,6 +39,26 @@ running pod needs:
   `REQUIRE_TAPIS_TOKEN=1` (identity comes from the hosting platform
   instead, per `architecture.md`)
 
+## Tapis apps
+
+Training jobs run the `fnas-lcd-train` app (`tapis/fnas-lcd-train-0.1.3.app.json`).
+Uploaded datasets additionally need the small `fnas-lcd-unpack` app
+(`tapis/fnas-lcd-unpack-0.1.0.app.json`), which unpacks an uploaded dataset in
+place on the execution system. Until it is registered and shared, uploads fail
+at the copying step, and the dataset's page shows Tapis's error. To register
+it, once:
+
+1. Create the app from the JSON file, under any Tapis account in the tenant
+   (TapisUI: Apps → create, pasting the JSON; or `POST /v3/apps`).
+2. Share it with the account the service runs jobs as (the one whose
+   refresh token the pod holds), so that account may launch it:
+   `POST /v3/apps/share/fnas-lcd-unpack` with `{"users": ["<that account>"]}`.
+
+Its paths (`/fs/ess/PAS2699/...`), queue (`cpu`) and `--account=PAS2699` are
+Pitzer-specific, like the training app's. The service sends its own job
+directories (from `TAPIS_WORK_BASE`) with every job; the app and version it
+uses can be changed with `TAPIS_UNPACK_APP_ID`/`TAPIS_UNPACK_APP_VERSION`.
+
 ## Current status
 
 **The pod does not start.** `icicle-service.yaml`'s `pod-name` is

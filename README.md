@@ -91,8 +91,16 @@ Dataset must be in **ImageFolder format**: a directory with a `train/` (and opti
 
 ## Upload your own dataset (web service)
 Go to **Datasets → Upload Dataset**, provide a name and a `.zip`/`.tar`/`.tar.gz`/`.tgz`
-archive in ImageFolder format (max 10GB). The service extracts it, validates the
-`train/` structure, and detects the class count automatically.
+archive in ImageFolder format (max 10 GB). The service checks the archive (no absolute
+paths, `..`, links or special files, and it must fit in the free disk space), extracts
+it, validates the `train/` structure, and detects the class count automatically. macOS
+metadata (`__MACOSX/`, `._*`, `.DS_Store`) is skipped. Uploading requires a known Tapis
+user, the same as submitting a job; only the uploader can delete the dataset
+(`DELETE /api/datasets/{id}`), and only while no job has used it.
+
+With remote training enabled, an upload is then copied to the execution system in the
+background (status **copying** on its page) and becomes usable once it is **ready** —
+see [Configure remote training](#configure-remote-training-tapis).
 
 ## Check or cancel a running job
 The **Jobs** page lists every job with live status and filtering by status. A job can
@@ -131,9 +139,13 @@ separate "connect your account" step. Leave it `0` (the default) for local
 use, where there is no portal to supply the cookie and the Account-page flow
 above applies instead.
 
-Datasets must already exist on the execution system — see `remote_path` in
-`src/web/config.py`; this container's own dataset paths mean nothing there,
-and uploaded datasets are rejected for remote training by design.
+Datasets must exist on the execution system: this container's own dataset
+paths mean nothing there. Pre-configured datasets name their location with
+`remote_path` in `src/web/config.py`. Uploaded datasets are copied there
+automatically, as the shared service account, into
+`$TAPIS_WORK_BASE/datasets/uploads/`, and unpacked by a small Tapis app,
+`tapis/fnas-lcd-unpack-0.1.0.app.json`, which must be registered once (see
+`docs/deployment.md`).
 
 ## Persist data across container restarts
 `docker compose down` stops containers but keeps the named volumes (Postgres data,
