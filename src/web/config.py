@@ -65,6 +65,10 @@ TAPIS_CLIENT_KEY = os.environ.get("TAPIS_CLIENT_KEY", "")
 TAPIS_REFRESH_TOKEN = os.environ.get("TAPIS_REFRESH_TOKEN", "")
 TAPIS_APP_ID = os.environ.get("TAPIS_APP_ID", "fnas-lcd-train")
 TAPIS_APP_VERSION = os.environ.get("TAPIS_APP_VERSION", "0.1.3")
+# The small app that unpacks an uploaded dataset on the execution system so
+# it can be trained (definition in tapis/, see dataset_service.stage_upload).
+TAPIS_UNPACK_APP_ID = os.environ.get("TAPIS_UNPACK_APP_ID", "fnas-lcd-unpack")
+TAPIS_UNPACK_APP_VERSION = os.environ.get("TAPIS_UNPACK_APP_VERSION", "0.1.0")
 TAPIS_SYSTEM = os.environ.get("TAPIS_SYSTEM", "pitzer-tapis")
 TAPIS_QUEUE = os.environ.get("TAPIS_QUEUE", "gpu-exp")
 # How the dataset reaches the training container:
@@ -178,6 +182,8 @@ class AppSettings:
     tapis_refresh_token: str = TAPIS_REFRESH_TOKEN
     tapis_app_id: str = TAPIS_APP_ID
     tapis_app_version: str = TAPIS_APP_VERSION
+    tapis_unpack_app_id: str = TAPIS_UNPACK_APP_ID
+    tapis_unpack_app_version: str = TAPIS_UNPACK_APP_VERSION
     tapis_system: str = TAPIS_SYSTEM
     tapis_queue: str = TAPIS_QUEUE
     tapis_stage_mode: str = TAPIS_STAGE_MODE

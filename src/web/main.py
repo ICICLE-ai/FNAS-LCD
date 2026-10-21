@@ -46,6 +46,13 @@ async def lifespan(app: FastAPI):
         resumed = job_manager.resume_interrupted()
         if resumed:
             print(f"  Resumed:  {resumed} in-flight training job(s)")
+        # Copies of uploads to the execution system aren't resumed: their
+        # files were on this container's disk. Their uploaders are told to
+        # upload again.
+        from web.services.dataset_service import fail_interrupted_copies
+        interrupted = fail_interrupted_copies()
+        if interrupted:
+            print(f"  Failed:   {interrupted} dataset copy(ies) interrupted by the restart")
     else:
         print("  Training: local (TAPIS_ENABLED=0 — models are not trained)")
     print(f"  Server:   http://{settings.host}:{settings.port}")

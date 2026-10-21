@@ -1,0 +1,44 @@
+{
+  "id": "fnas-lcd-unpack",
+  "version": "0.1.0",
+  "description": "FNAS-LCD: unpack an uploaded dataset (dataset.tar) in place on Pitzer so it can be trained",
+  "runtime": "SINGULARITY",
+  "runtimeOptions": [
+    "SINGULARITY_RUN"
+  ],
+  "containerImage": "docker://public.ecr.aws/docker/library/debian:bookworm-slim",
+  "jobType": "BATCH",
+  "jobAttributes": {
+    "description": "Unpack one uploaded FNAS-LCD dataset",
+    "execSystemId": "pitzer-tapis",
+    "execSystemExecDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}",
+    "execSystemInputDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}",
+    "execSystemOutputDir": "/fs/ess/PAS2699/jhyan/tapis-jobs/${JobUUID}/output",
+    "execSystemLogicalQueue": "cpu",
+    "archiveSystemId": "pitzer-tapis",
+    "archiveSystemDir": "/fs/ess/PAS2699/jhyan/tapis-archive/${JobUUID}",
+    "archiveOnAppError": true,
+    "archiveMode": "ALWAYS",
+    "nodeCount": 1,
+    "coresPerNode": 1,
+    "memoryMB": 4096,
+    "maxMinutes": 60,
+    "parameterSet": {
+      "appArgs": [
+        {
+          "name": "unpack",
+          "description": "The service uploads the dataset's archive as dataset.tar into the dataset's folder, and binds that folder at /dataset with a containerArg named dataset_bind.",
+          "arg": "sh -c 'tar -xf /dataset/dataset.tar -C /dataset && rm /dataset/dataset.tar'",
+          "inputMode": "FIXED"
+        }
+      ],
+      "schedulerOptions": [
+        {
+          "name": "account_name",
+          "arg": "--account=PAS2699",
+          "inputMode": "FIXED"
+        }
+      ]
+    }
+  }
+}

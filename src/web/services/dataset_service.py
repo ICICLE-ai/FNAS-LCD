@@ -7,6 +7,8 @@ import re
 import shutil
 import stat
 import tarfile
+import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import BinaryIO
@@ -224,8 +226,11 @@ def local_upload_dir(ds_id: int, name: str) -> Path:
 
 
 def delete_local_files(ds_id: int, name: str) -> None:
-    """Remove whatever an upload left on this container's disk."""
-    shutil.rmtree(local_upload_dir(ds_id, name), ignore_errors=True)
+    """Remove whatever an upload left on this container's disk: its folder
+    and the archive re-packed from it for copying (see stage_upload)."""
+    folder = local_upload_dir(ds_id, name)
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.with_name(folder.name + ".tar").unlink(missing_ok=True)
 
 
 def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_by: str) -> dict:
@@ -274,18 +279,27 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_b
         if skipped:
             description += f"; skipped {skipped} macOS metadata file{'s' if skipped > 1 else ''}"
 
+        # With remote training on, the dataset becomes ready only once it has
+        # been copied to the execution system (stage_upload); until then it
+        # isn't offered for search or training.
+        staged = settings.tapis_enabled
         with get_db() as conn:
             conn.execute(
-                "UPDATE datasets SET name=%s, path=%s, num_classes=%s, is_ready=%s, description=%s WHERE id=%s",
-                (safe_name, str(upload_dir), num_classes, 1, description, ds_id),
+                "UPDATE datasets SET name=%s, path=%s, num_classes=%s, is_ready=%s, description=%s, "
+                "copy_status=%s WHERE id=%s",
+                (safe_name, str(upload_dir), num_classes, 0 if staged else 1, description,
+                 "copying" if staged else None, ds_id),
             )
+        if staged:
+            threading.Thread(target=stage_upload, args=(ds_id,), daemon=True,
+                             name=f"stage-dataset-{ds_id}").start()
 
         return {
             "id": ds_id,
             "name": safe_name,
             "path": str(upload_dir),
             "num_classes": num_classes,
-            "is_ready": True,
+            "is_ready": not staged,
         }
 
     except Exception:
@@ -294,3 +308,122 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_b
         with get_db() as conn:
             conn.execute("DELETE FROM datasets WHERE id = %s", (ds_id,))
         raise
+
+
+# ── copying uploads to the execution system ────────────────────────────────
+#
+# Training runs on the HPC system, which can't see this container's disk. So
+# once an upload is validated here, stage_upload copies it there in the
+# background: it re-packs the validated folder into a plain tar, uploads that
+# with Tapis, and runs the small unpack app. Then the dataset is ready for
+# training, exactly like a pre-configured one, and nothing of it is kept on
+# this container's disk (which a pod restart wipes anyway).
+
+_INTERRUPTED = ("Copying to the training system was interrupted by a service restart. "
+                "Please upload the dataset again.")
+
+
+def remote_upload_dir(ds_id: int, name: str) -> str:
+    """Where an upload lives on the execution system."""
+    from . import tapis_service
+    return f"{tapis_service.uploads_base()}/{ds_id}_{name}"
+
+
+def _plain_entry(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Neutral ownership and permissions for the copy: whatever the
+    container's own files carry means nothing on the execution system."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    info.mode = 0o755 if info.isdir() else 0o644
+    return info
+
+
+def _repack(src_dir: Path, tar_path: Path) -> None:
+    """Pack a validated dataset folder into an uncompressed tar whose top
+    level is the folder's contents (train/, val/, ...). Each file is deleted
+    as soon as it is in the archive, so this needs little extra disk."""
+    with tarfile.open(tar_path, "w", format=tarfile.GNU_FORMAT) as tf:
+        for dirpath, dirnames, filenames in os.walk(src_dir):
+            dirnames.sort()
+            here = Path(dirpath)
+            rel = here.relative_to(src_dir)
+            if rel != Path("."):
+                tf.add(here, arcname=str(rel), recursive=False, filter=_plain_entry)
+            for fname in sorted(filenames):
+                tf.add(here / fname, arcname=str(rel / fname), recursive=False, filter=_plain_entry)
+                (here / fname).unlink()
+    shutil.rmtree(src_dir, ignore_errors=True)
+
+
+def _fail_copy(ds_id: int, name: str, reason: str) -> None:
+    from ..database import get_db
+    from . import tapis_service
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE datasets SET copy_status='failed', copy_error=%s WHERE id=%s",
+            (reason, ds_id),
+        )
+    delete_local_files(ds_id, name)
+    try:
+        tapis_service.delete_upload_dir(remote_upload_dir(ds_id, name))
+    except Exception as e:  # noqa: BLE001 - deleting the dataset retries this
+        print(f"WARNING: could not remove the remote folder of failed upload {ds_id}: {e}")
+
+
+def stage_upload(ds_id: int) -> None:
+    """Copy one validated upload to the execution system and unpack it
+    there, then mark it ready for training -- or failed, with the reason."""
+    from ..database import get_db
+    from . import tapis_service
+
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM datasets WHERE id=%s", (ds_id,)).fetchone()
+    name = row["name"]
+    local_dir = local_upload_dir(ds_id, name)
+    tar_path = local_dir.with_name(local_dir.name + ".tar")
+
+    try:
+        remote_dir = remote_upload_dir(ds_id, name)
+        _repack(local_dir, tar_path)
+        tapis_service.make_dir(remote_dir)
+        tapis_service.upload_file(tar_path, f"{remote_dir}/{tapis_service.UNPACK_ARCHIVE_NAME}")
+        tar_path.unlink()
+
+        uuid = tapis_service.submit_unpack(
+            dataset_dir=remote_dir, name=f"fnas-lcd-unpack-dataset-{ds_id}",
+            uploaded_by=row["uploaded_by"])
+        while (state := tapis_service.get_status(uuid)) not in tapis_service.TERMINAL_STATES:
+            time.sleep(settings.tapis_poll_seconds)
+        if state != "FINISHED":
+            detail = tapis_service.get_last_message(uuid) or state
+            log = tapis_service.download_output(uuid, tapis_service.LOG_FILE)
+            if log:
+                detail += "\n" + log.decode(errors="replace")[-1000:]
+            raise RuntimeError(f"the unpack job ({uuid}) ended {state}: {detail}")
+    except Exception as e:  # noqa: BLE001
+        _fail_copy(ds_id, name, f"Copying to the training system failed: {e}")
+        return
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE datasets SET remote_path=%s, path=%s, copy_status='ready', copy_error=NULL, "
+            "is_ready=1 WHERE id=%s",
+            (remote_dir, remote_dir, ds_id),
+        )
+
+
+def fail_interrupted_copies() -> int:
+    """At startup, mark failed any upload still marked 'copying': the thread
+    copying it died with the previous process (and on a pod, the disk
+    holding its files too). Returns how many there were."""
+    from ..database import get_db
+
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name FROM datasets WHERE copy_status='copying'"
+        ).fetchall()
+    for row in rows:
+        threading.Thread(target=_fail_copy, args=(row["id"], row["name"], _INTERRUPTED),
+                         daemon=True).start()
+    return len(rows)

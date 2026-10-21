@@ -153,6 +153,12 @@ _DATASETS_MIGRATION_COLUMNS = {
     # Tapis username of whoever uploaded the dataset; only they may delete it.
     # NULL for pre-configured datasets and for uploads made before this existed.
     "uploaded_by": "TEXT",
+    # Progress of copying an upload to the execution system so it can be
+    # trained: 'copying', 'ready' or 'failed' (reason in copy_error). NULL for
+    # pre-configured datasets, uploads made before this existed, and uploads
+    # when Tapis is disabled.
+    "copy_status": "TEXT",
+    "copy_error": "TEXT",
 }
 
 

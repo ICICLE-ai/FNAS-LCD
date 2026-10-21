@@ -167,6 +167,11 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
             raise HTTPException(400, "Cannot delete pre-configured datasets")
         if not session.get("tapis_username") or row["uploaded_by"] != session["tapis_username"]:
             raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
+        if row["copy_status"] == "copying":
+            raise HTTPException(
+                409, "This dataset is still being copied to the training system. "
+                     "Try again once it is ready or has failed."
+            )
         used = conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE dataset_id=%s", (dataset_id,)
         ).fetchone()["n"]
@@ -176,6 +181,18 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
                      f"deleting it would erase their records."
             )
 
+        # Its copy on the execution system goes first: if that can't be
+        # removed, nothing is deleted and the user can simply retry.
+        if row["copy_status"] is not None:
+            from ..services import tapis_service
+            try:
+                tapis_service.delete_upload_dir(
+                    dataset_service.remote_upload_dir(row["id"], row["name"]))
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    502, f"Couldn't delete the dataset's copy on the training system, "
+                         f"so nothing was deleted: {e}"
+                )
         dataset_service.delete_local_files(row["id"], row["name"])
         conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
     return MessageResponse(message=f"Dataset {dataset_id} deleted")
