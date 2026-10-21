@@ -123,7 +123,7 @@ def upload_dataset(
 
     allowed_ext = (".zip", ".tar", ".tar.gz", ".tgz")
     if not any(file.filename.endswith(ext) for ext in allowed_ext):
-        raise HTTPException(400, f"Unsupported format. Allowed: {allowed_ext}")
+        raise HTTPException(400, f"Unsupported format. Allowed: {', '.join(allowed_ext)}")
 
     if file.size is not None and file.size > settings.max_upload_bytes:
         raise HTTPException(413, "File too large: the maximum upload size is "

@@ -18,6 +18,8 @@ router = APIRouter()
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+templates.env.globals["max_upload_bytes"] = settings.max_upload_bytes
+templates.env.globals["max_upload_label"] = dataset_service.format_size(settings.max_upload_bytes)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -127,7 +129,7 @@ def dataset_upload_handler(
     allowed = (".zip", ".tar", ".tar.gz", ".tgz")
     if not any(file.filename.endswith(ext) for ext in allowed):
         return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": f"Unsupported format. Allowed: {allowed}",
+            "error": f"Unsupported format. Allowed: {', '.join(allowed)}",
         })
 
     if file.size is not None and file.size > settings.max_upload_bytes:

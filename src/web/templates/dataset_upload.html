@@ -28,11 +28,33 @@ test/  (optional)</pre>
                    placeholder="e.g. my_custom_dataset">
         </div>
         <div class="form-group">
-            <label for="file">Archive file (.zip, .tar, .tar.gz, .tgz)</label>
+            <label for="file">Archive file (.zip, .tar, .tar.gz, .tgz), up to {{ max_upload_label }}</label>
+            {# macOS file pickers can't match a two-part extension like .tar.gz,
+               so .gz and the archive MIME types are listed too; anything
+               unsupported is still refused by the server. #}
             <input type="file" id="file" name="file" required
-                   accept=".zip,.tar,.tar.gz,.tgz">
+                   accept=".zip,.tar,.tar.gz,.tgz,.gz,application/zip,application/x-tar,application/gzip,application/x-gzip,application/x-compressed-tar">
+        </div>
+        <div class="alert alert-error" id="file-too-large" hidden>
+            This file is too large: the maximum upload size is {{ max_upload_label }}.
         </div>
         <button type="submit" class="btn btn-primary">Upload</button>
     </form>
 </div>
+
+<script>
+// Refuse an oversized file before uploading it, rather than after the wait.
+(function () {
+    const input = document.getElementById('file');
+    const warning = document.getElementById('file-too-large');
+    const tooLarge = () => input.files.length > 0 && input.files[0].size > {{ max_upload_bytes }};
+    input.addEventListener('change', () => { warning.hidden = !tooLarge(); });
+    input.form.addEventListener('submit', (event) => {
+        if (tooLarge()) {
+            event.preventDefault();
+            warning.hidden = false;
+        }
+    });
+})();
+</script>
 {% endblock %}
