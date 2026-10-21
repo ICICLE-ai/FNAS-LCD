@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 import shutil
 import tarfile
-import tempfile
 import zipfile
 from pathlib import Path
+from typing import BinaryIO
 
 from ..config import settings
 
@@ -62,30 +62,40 @@ def _sanitize_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
 
-def extract_archive_to(target_dir: Path, file_data: bytes, filename: str) -> Path:
+def format_size(num_bytes: float) -> str:
+    """Human-readable size in binary units, e.g. "512 bytes", "1.5 MB", "10 GB"."""
+    size = float(num_bytes)
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if size < 1024:
+            break
+        size /= 1024
+    else:
+        unit = "TB"
+    text = f"{size:.0f}" if unit == "bytes" else f"{size:.1f}".removesuffix(".0")
+    return f"{text} {unit}"
+
+
+def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Path:
     """Extract uploaded zip/tar/tgz archive into target_dir, flattening
     a single top-level directory if present.
+
+    `archive` is an open, seekable binary file. It is read in place, never
+    loaded into memory as a whole, so an upload doesn't need RAM of its size.
 
     Returns the path to the extracted dataset root (should contain train/).
     """
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
-        tmp.write(file_data)
-        tmp_path = Path(tmp.name)
-
-    try:
-        if filename.endswith(".zip"):
-            with zipfile.ZipFile(tmp_path, "r") as zf:
-                zf.extractall(target_dir)
-        elif filename.endswith((".tar.gz", ".tgz", ".tar")):
-            mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
-            with tarfile.open(tmp_path, mode) as tf:
-                tf.extractall(target_dir)
-        else:
-            raise ValueError(f"Unsupported archive format: {filename}")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    archive.seek(0)
+    if filename.endswith(".zip"):
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(target_dir)
+    elif filename.endswith((".tar.gz", ".tgz", ".tar")):
+        mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
+        with tarfile.open(fileobj=archive, mode=mode) as tf:
+            tf.extractall(target_dir)
+    else:
+        raise ValueError(f"Unsupported archive format: {filename}")
 
     # Flatten if everything is inside a single top-level directory
     entries = list(target_dir.iterdir())
@@ -107,8 +117,10 @@ def extract_archive_to(target_dir: Path, file_data: bytes, filename: str) -> Pat
     return target_dir
 
 
-def add_uploaded_dataset(name: str, file_data: bytes, filename: str) -> dict:
+def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str) -> dict:
     """Full pipeline: extract, validate, register.
+
+    `archive` is the uploaded file, open for reading (see extract_archive_to).
 
     Returns dict with dataset info.
     """
@@ -128,7 +140,7 @@ def add_uploaded_dataset(name: str, file_data: bytes, filename: str) -> dict:
     upload_dir = settings.uploads_dir / f"{ds_id}_{safe_name}"
 
     try:
-        extract_archive_to(upload_dir, file_data, filename)
+        extract_archive_to(upload_dir, archive, filename)
 
         valid, msg = validate_imagefolder(upload_dir)
         if not valid:

@@ -22,6 +22,10 @@ UPLOADS_DIR = STORAGE_DIR / "uploads"
 CHECKPOINTS_DIR = STORAGE_DIR / "checkpoints"
 MODELS_DIR = STORAGE_DIR / "models"
 
+# Largest dataset archive accepted, in bytes. Enforced before an upload is
+# written to disk (see main.py), and stated on the upload page.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+
 # ── database (Postgres) ──────────────────────────────────────────────────────
 # Defaults match the `db` service in docker-compose.yml; override via env
 # vars for bare local dev against a different Postgres instance.
@@ -146,6 +150,7 @@ class AppSettings:
     uploads_dir: Path = field(default_factory=lambda: UPLOADS_DIR)
     checkpoints_dir: Path = field(default_factory=lambda: CHECKPOINTS_DIR)
     models_dir: Path = field(default_factory=lambda: MODELS_DIR)
+    max_upload_bytes: int = MAX_UPLOAD_BYTES
     lookup_csv: Path = field(default_factory=lambda: LOOKUP_CSV)
     model_root: Path = field(default_factory=lambda: MODEL_ROOT)
     repo_root: Path = field(default_factory=lambda: REPO_ROOT)

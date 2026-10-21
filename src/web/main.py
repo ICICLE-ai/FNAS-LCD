@@ -73,6 +73,60 @@ def health():
     }
 
 
+# ── upload size limit ──────────────────────────────────────────────────────
+# Starlette writes an uploaded file to a temporary file in full before any
+# route code runs, so a route can only check the size after the disk space is
+# already used. The limit is therefore enforced here, while the body arrives.
+_UPLOAD_PATHS = {"/datasets/upload", "/api/datasets/upload"}
+# Allowance for the multipart framing and the form's other fields.
+_UPLOAD_OVERHEAD_BYTES = 1024 * 1024
+
+
+class _UploadSizeLimit:
+    """Refuse dataset uploads larger than settings.max_upload_bytes: up front
+    when the request declares its length, otherwise as soon as the body
+    passes the limit."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if not (scope["type"] == "http" and scope["method"] == "POST"
+                and scope["path"] in _UPLOAD_PATHS):
+            await self.app(scope, receive, send)
+            return
+
+        from fastapi.responses import JSONResponse
+        from starlette.exceptions import HTTPException
+        from web.config import settings
+        from web.services.dataset_service import format_size
+
+        limit = settings.max_upload_bytes + _UPLOAD_OVERHEAD_BYTES
+        message = (f"File too large: the maximum upload size is "
+                   f"{format_size(settings.max_upload_bytes)}.")
+
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > limit:
+            await JSONResponse({"detail": message}, status_code=413)(scope, receive, send)
+            return
+
+        received = 0
+
+        async def counting_receive():
+            nonlocal received
+            event = await receive()
+            if event["type"] == "http.request":
+                received += len(event.get("body", b""))
+                if received > limit:
+                    raise HTTPException(413, message)
+            return event
+
+        await self.app(scope, counting_receive, send)
+
+
+app.add_middleware(_UploadSizeLimit)
+
+
 # ── static files ───────────────────────────────────────────────────────────
 _STATIC = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")

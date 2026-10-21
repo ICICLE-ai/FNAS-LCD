@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from ..config import settings
 from ..database import get_db
 from ..deps import apply_session_cookie, get_session
 from .api import _row_to_dataset, _row_to_job
@@ -110,8 +111,10 @@ def dataset_upload_form(request: Request):
     return templates.TemplateResponse(request, "dataset_upload.html")
 
 
+# A plain `def` (not async) so FastAPI runs it in a worker thread: extracting
+# a multi-GB archive would otherwise block every other request meanwhile.
 @router.post("/datasets/upload", response_class=HTMLResponse)
-async def dataset_upload_handler(
+def dataset_upload_handler(
     request: Request,
     name: str = Form(...),
     file: UploadFile = File(...),
@@ -127,9 +130,14 @@ async def dataset_upload_handler(
             "error": f"Unsupported format. Allowed: {allowed}",
         })
 
-    file_bytes = await file.read()
+    if file.size is not None and file.size > settings.max_upload_bytes:
+        return templates.TemplateResponse(request, "dataset_upload.html", {
+            "error": f"File too large: the maximum upload size is "
+                     f"{dataset_service.format_size(settings.max_upload_bytes)}.",
+        })
+
     try:
-        info = dataset_service.add_uploaded_dataset(name, file_bytes, file.filename)
+        info = dataset_service.add_uploaded_dataset(name, file.file, file.filename)
     except Exception as e:
         return templates.TemplateResponse(request, "dataset_upload.html", {
             "error": str(e),

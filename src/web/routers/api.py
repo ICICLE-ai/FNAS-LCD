@@ -106,12 +106,18 @@ def get_dataset(dataset_id: int):
     return _row_to_dataset(row)
 
 
-@router.post("/datasets/upload", response_model=DatasetResponse)
-async def upload_dataset(
+# A plain `def` (not async) so FastAPI runs it in a worker thread: extracting
+# a multi-GB archive would otherwise block every other request meanwhile.
+@router.post(
+    "/datasets/upload",
+    response_model=DatasetResponse,
+    description="Upload a zip/tar archive in ImageFolder format, at most "
+                f"{dataset_service.format_size(settings.max_upload_bytes)}.",
+)
+def upload_dataset(
     name: str = Query(..., description="Dataset display name"),
     file: UploadFile = File(...),
 ):
-    """Upload a zip/tar archive in ImageFolder format."""
     if not file.filename:
         raise HTTPException(400, "Filename is required")
 
@@ -119,12 +125,12 @@ async def upload_dataset(
     if not any(file.filename.endswith(ext) for ext in allowed_ext):
         raise HTTPException(400, f"Unsupported format. Allowed: {allowed_ext}")
 
-    file_bytes = await file.read()
-    if len(file_bytes) > 10 * 1024 * 1024 * 1024:  # 10 GB
-        raise HTTPException(400, "File too large (max 10 GB)")
+    if file.size is not None and file.size > settings.max_upload_bytes:
+        raise HTTPException(413, "File too large: the maximum upload size is "
+                                 f"{dataset_service.format_size(settings.max_upload_bytes)}.")
 
     try:
-        info = dataset_service.add_uploaded_dataset(name, file_bytes, file.filename)
+        info = dataset_service.add_uploaded_dataset(name, file.file, file.filename)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
