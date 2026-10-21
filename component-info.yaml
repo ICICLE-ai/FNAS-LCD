@@ -1,13 +1,13 @@
 # ICICLE component metadata for FNAS-LCD.
 
-- id: "FNAS-LCD:0.1.0"
+- id: "FNASLCD:0.1.0"
   owner: "Jinghua Yan" 
   primaryThrust: "core/AI4CI"
   name: "FNAS-LCD"
   status: "AlphaRelease"
   description: "Latency-constrained neural architecture search: an analytic, zero-shot proxy score combined with frontier enumeration over a precomputed block lookup table selects an architecture under a target latency budget, then trains and exports it. Ships as a web service (search, job tracking, model download) plus a CLI."
   componentVersion: "0.1.0"
-  targetIcicleRelease: "2026-09"
+  targetIcicleRelease: "2026-10"
 
   # CONFIRM: license not yet chosen — release guidance says to consult the
   # IP department before picking one. Placeholder URL below assumes the
