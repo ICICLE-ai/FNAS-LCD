@@ -9,7 +9,7 @@
         <tr><th>ID</th><td>{{ dataset.id }}</td></tr>
         <tr><th>Path</th><td><code>{{ dataset.path }}</code></td></tr>
         <tr><th>Classes</th><td>{{ dataset.num_classes }}</td></tr>
-        <tr><th>Type</th><td>{% if dataset.is_upload %}Uploaded{% else %}Built-in{% endif %}</td></tr>
+        <tr><th>Type</th><td>{% if dataset.is_upload %}Uploaded{% if dataset.uploaded_by %} by {{ dataset.uploaded_by }}{% endif %}{% else %}Built-in{% endif %}</td></tr>
         <tr><th>Description</th><td>{{ dataset.description }}</td></tr>
         <tr><th>Created</th><td>{{ dataset.created_at[:19] if dataset.created_at else "" }}</td></tr>
     </table>

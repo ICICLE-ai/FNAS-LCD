@@ -150,6 +150,9 @@ _DATASETS_MIGRATION_COLUMNS = {
     # Path to this dataset on the Tapis execution system. Datasets without one
     # cannot be trained remotely — this container's paths do not exist there.
     "remote_path": "TEXT",
+    # Tapis username of whoever uploaded the dataset; only they may delete it.
+    # NULL for pre-configured datasets and for uploads made before this existed.
+    "uploaded_by": "TEXT",
 }
 
 

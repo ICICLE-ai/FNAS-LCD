@@ -118,34 +118,38 @@ def dataset_upload_form(request: Request):
 @router.post("/datasets/upload", response_class=HTMLResponse)
 def dataset_upload_handler(
     request: Request,
+    response: Response,
     name: str = Form(...),
     file: UploadFile = File(...),
+    session: dict = Depends(get_session),
 ):
+    def form_error(message: str):
+        page = templates.TemplateResponse(request, "dataset_upload.html", {"error": message})
+        return apply_session_cookie(response, page)
+
+    # Uploads are attributed, like jobs: only the uploader may delete one.
+    if not session.get("tapis_username"):
+        return form_error("Connect your Tapis account before uploading a dataset.")
+
     if not file.filename:
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": "Filename is required",
-        })
+        return form_error("Filename is required")
 
     allowed = (".zip", ".tar", ".tar.gz", ".tgz")
     if not any(file.filename.endswith(ext) for ext in allowed):
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": f"Unsupported format. Allowed: {', '.join(allowed)}",
-        })
+        return form_error(f"Unsupported format. Allowed: {', '.join(allowed)}")
 
     if file.size is not None and file.size > settings.max_upload_bytes:
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": f"File too large: the maximum upload size is "
-                     f"{dataset_service.format_size(settings.max_upload_bytes)}.",
-        })
+        return form_error(f"File too large: the maximum upload size is "
+                          f"{dataset_service.format_size(settings.max_upload_bytes)}.")
 
     try:
-        info = dataset_service.add_uploaded_dataset(name, file.file, file.filename)
+        info = dataset_service.add_uploaded_dataset(
+            name, file.file, file.filename, uploaded_by=session["tapis_username"])
     except Exception as e:
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": str(e),
-        })
+        return form_error(str(e))
 
-    return RedirectResponse(f"/datasets/{info['id']}", status_code=303)
+    redirect = RedirectResponse(f"/datasets/{info['id']}", status_code=303)
+    return apply_session_cookie(response, redirect)
 
 
 @router.get("/datasets/{dataset_id}", response_class=HTMLResponse)

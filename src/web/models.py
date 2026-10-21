@@ -19,6 +19,7 @@ class DatasetResponse(BaseModel):
     is_ready: bool
     description: str = ""
     created_at: str = ""
+    uploaded_by: Optional[str] = None
 
     class Config:
         from_attributes = True

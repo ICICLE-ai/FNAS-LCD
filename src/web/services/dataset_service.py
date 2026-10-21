@@ -218,27 +218,43 @@ def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Pa
     return target_dir
 
 
-def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str) -> dict:
+def local_upload_dir(ds_id: int, name: str) -> Path:
+    """Where an upload is unpacked on this container's disk."""
+    return settings.uploads_dir / f"{ds_id}_{name}"
+
+
+def delete_local_files(ds_id: int, name: str) -> None:
+    """Remove whatever an upload left on this container's disk."""
+    shutil.rmtree(local_upload_dir(ds_id, name), ignore_errors=True)
+
+
+def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_by: str) -> dict:
     """Full pipeline: extract, validate, register.
 
     `archive` is the uploaded file, open for reading (see extract_archive_to).
+    `uploaded_by` is the uploader's Tapis username; only they may delete it.
 
     Returns dict with dataset info.
     """
+    import psycopg
+
     safe_name = _sanitize_name(name)
 
     # Build a unique directory name
     from ..database import get_db
-    with get_db() as conn:
-        # Reserve an ID by inserting placeholder
-        cursor = conn.execute(
-            "INSERT INTO datasets (name, path, num_classes, is_upload, is_ready, description) "
-            "VALUES (%s, '', 0, 1, 0, 'Uploading...') RETURNING id",
-            (safe_name,),
-        )
-        ds_id = cursor.fetchone()["id"]
+    try:
+        with get_db() as conn:
+            # Reserve an ID by inserting placeholder
+            cursor = conn.execute(
+                "INSERT INTO datasets (name, path, num_classes, is_upload, is_ready, description, uploaded_by) "
+                "VALUES (%s, '', 0, 1, 0, 'Uploading...', %s) RETURNING id",
+                (safe_name, uploaded_by),
+            )
+            ds_id = cursor.fetchone()["id"]
+    except psycopg.errors.UniqueViolation:
+        raise ValueError(f'A dataset named "{safe_name}" already exists. Please choose another name.')
 
-    upload_dir = settings.uploads_dir / f"{ds_id}_{safe_name}"
+    upload_dir = local_upload_dir(ds_id, safe_name)
 
     try:
         available = shutil.disk_usage(settings.uploads_dir).free - _FREE_SPACE_MARGIN

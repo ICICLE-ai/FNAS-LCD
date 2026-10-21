@@ -40,6 +40,7 @@ def _row_to_dataset(row) -> DatasetResponse:
         is_ready=bool(row["is_ready"]),
         description=row["description"] or "",
         created_at=row["created_at"] or "",
+        uploaded_by=row["uploaded_by"] if "uploaded_by" in row.keys() else None,
     )
 
 
@@ -117,7 +118,15 @@ def get_dataset(dataset_id: int):
 def upload_dataset(
     name: str = Query(..., description="Dataset display name"),
     file: UploadFile = File(...),
+    session: dict = Depends(get_session),
 ):
+    # Uploads are attributed, like jobs: only the uploader may delete one.
+    uploaded_by = session.get("tapis_username")
+    if not uploaded_by:
+        raise HTTPException(
+            403, "Connect your Tapis account (GET /account) before uploading a dataset."
+        )
+
     if not file.filename:
         raise HTTPException(400, "Filename is required")
 
@@ -130,7 +139,8 @@ def upload_dataset(
                                  f"{dataset_service.format_size(settings.max_upload_bytes)}.")
 
     try:
-        info = dataset_service.add_uploaded_dataset(name, file.file, file.filename)
+        info = dataset_service.add_uploaded_dataset(
+            name, file.file, file.filename, uploaded_by=uploaded_by)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -142,20 +152,31 @@ def upload_dataset(
 
 
 @router.delete("/datasets/{dataset_id}", response_model=MessageResponse)
-def delete_dataset(dataset_id: int):
+def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
+    """Delete an uploaded dataset. Only its uploader may, and only while no
+    job has used it: jobs keep a reference to their dataset, so deleting it
+    would mean erasing those jobs' records."""
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "Dataset not found")
-    if not row["is_upload"]:
-        raise HTTPException(400, "Cannot delete pre-configured datasets")
+        # Locked until the delete commits, so no job can start using it meanwhile.
+        row = conn.execute(
+            "SELECT * FROM datasets WHERE id=%s FOR UPDATE", (dataset_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Dataset not found")
+        if not row["is_upload"]:
+            raise HTTPException(400, "Cannot delete pre-configured datasets")
+        if not session.get("tapis_username") or row["uploaded_by"] != session["tapis_username"]:
+            raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
+        used = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE dataset_id=%s", (dataset_id,)
+        ).fetchone()["n"]
+        if used:
+            raise HTTPException(
+                409, f"This dataset can't be deleted: {used} job(s) used it, and "
+                     f"deleting it would erase their records."
+            )
 
-    import shutil
-    ds_path = Path(row["path"])
-    if ds_path.is_dir():
-        shutil.rmtree(ds_path, ignore_errors=True)
-
-    with get_db() as conn:
+        dataset_service.delete_local_files(row["id"], row["name"])
         conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
     return MessageResponse(message=f"Dataset {dataset_id} deleted")
 
