@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import stat
 import tarfile
 import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
 from ..config import settings
+
+# Disk space left free when deciding whether an upload fits, so a dataset
+# never fills the disk completely.
+_FREE_SPACE_MARGIN = 1024 * 1024 * 1024  # 1 GB
+
+
+class ArchiveRejected(ValueError):
+    """An upload that can't be accepted; the message tells the user why."""
 
 
 def detect_num_classes(data_dir: Path) -> int:
@@ -75,6 +85,69 @@ def format_size(num_bytes: float) -> str:
     return f"{text} {unit}"
 
 
+def _unsafe_path(name: str) -> str | None:
+    """Why an archive entry's path could escape the dataset folder, or None."""
+    # Some unpackers treat backslashes as separators, so check both.
+    path = name.replace("\\", "/")
+    if path.startswith("/") or re.match(r"[A-Za-z]:", path):
+        return "an absolute path"
+    if ".." in path.split("/"):
+        return 'a ".." path'
+    return None
+
+
+def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> int:
+    """Check every entry of an uploaded archive without extracting anything,
+    and return the total size of its files once unpacked.
+
+    Rejects entries that could write outside the dataset folder (absolute
+    paths, ".." components, symbolic or hard links) and special files such as
+    devices: an image dataset only needs folders and regular files. Also
+    rejects the archive as soon as its contents exceed `max_total` bytes, the
+    disk space available for unpacking it.
+    """
+    total = 0
+    archive.seek(0)
+
+    def check(name: str, problem: str | None, size: int) -> None:
+        nonlocal total
+        if problem:
+            raise ArchiveRejected(
+                f'The archive contains {problem} ("{name}"), which isn\'t allowed. '
+                f"A dataset archive may only contain folders and regular files."
+            )
+        total += size
+        if total > max_total:
+            raise ArchiveRejected(
+                f"This archive unpacks to more than the {format_size(max_total)} of "
+                f"disk space the server has available right now. Please upload a "
+                f"smaller dataset, or try again later."
+            )
+
+    if filename.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+                # Unix file type bits, when the zip records them.
+                kind = stat.S_IFMT(info.external_attr >> 16)
+                problem = _unsafe_path(info.filename)
+                if not problem and kind == stat.S_IFLNK:
+                    problem = "a link"
+                elif not problem and kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    problem = "a special file"
+                check(info.filename, problem, 0 if info.is_dir() else info.file_size)
+    else:
+        mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
+        with tarfile.open(fileobj=archive, mode=mode) as tf:
+            for member in tf:
+                problem = _unsafe_path(member.name)
+                if not problem and (member.issym() or member.islnk()):
+                    problem = "a link"
+                elif not problem and not (member.isreg() or member.isdir()):
+                    problem = "a special file"
+                check(member.name, problem, member.size if member.isreg() else 0)
+    return total
+
+
 def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Path:
     """Extract uploaded zip/tar/tgz archive into target_dir, flattening
     a single top-level directory if present.
@@ -93,7 +166,9 @@ def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Pa
     elif filename.endswith((".tar.gz", ".tgz", ".tar")):
         mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
         with tarfile.open(fileobj=archive, mode=mode) as tf:
-            tf.extractall(target_dir)
+            # "data" refuses anything that would land outside target_dir,
+            # a second line of defense behind inspect_archive.
+            tf.extractall(target_dir, filter="data")
     else:
         raise ValueError(f"Unsupported archive format: {filename}")
 
@@ -140,6 +215,8 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str) -> dict:
     upload_dir = settings.uploads_dir / f"{ds_id}_{safe_name}"
 
     try:
+        available = shutil.disk_usage(settings.uploads_dir).free - _FREE_SPACE_MARGIN
+        inspect_archive(archive, filename, max_total=max(available, 0))
         extract_archive_to(upload_dir, archive, filename)
 
         valid, msg = validate_imagefolder(upload_dir)
