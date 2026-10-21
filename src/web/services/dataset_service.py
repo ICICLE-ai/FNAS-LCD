@@ -96,9 +96,20 @@ def _unsafe_path(name: str) -> str | None:
     return None
 
 
-def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> int:
-    """Check every entry of an uploaded archive without extracting anything,
-    and return the total size of its files once unpacked.
+def _is_macos_metadata(name: str) -> bool:
+    """macOS bookkeeping entries, which hold no image data: Finder's __MACOSX/
+    folder, AppleDouble "._" files and .DS_Store. Finder's Compress adds the
+    first; macOS tar adds "._" files next to any file with extended
+    attributes. Left in, a "._x.jpg" looks like an image and crashes training."""
+    parts = [p for p in name.replace("\\", "/").split("/") if p]
+    return bool(parts) and ("__MACOSX" in parts or parts[-1].startswith("._")
+                            or parts[-1] == ".DS_Store")
+
+
+def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> tuple[int, int]:
+    """Check every entry of an uploaded archive without extracting anything.
+    Returns the total size of its files once unpacked, and how many macOS
+    metadata files will be skipped (see _is_macos_metadata).
 
     Rejects entries that could write outside the dataset folder (absolute
     paths, ".." components, symbolic or hard links) and special files such as
@@ -107,6 +118,7 @@ def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> int:
     disk space available for unpacking it.
     """
     total = 0
+    skipped = 0
     archive.seek(0)
 
     def check(name: str, problem: str | None, size: int) -> None:
@@ -127,6 +139,9 @@ def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> int:
     if filename.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             for info in zf.infolist():
+                if _is_macos_metadata(info.filename):
+                    skipped += not info.is_dir()
+                    continue
                 # Unix file type bits, when the zip records them.
                 kind = stat.S_IFMT(info.external_attr >> 16)
                 problem = _unsafe_path(info.filename)
@@ -139,13 +154,25 @@ def inspect_archive(archive: BinaryIO, filename: str, max_total: int) -> int:
         mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
         with tarfile.open(fileobj=archive, mode=mode) as tf:
             for member in tf:
+                if _is_macos_metadata(member.name):
+                    skipped += not member.isdir()
+                    continue
                 problem = _unsafe_path(member.name)
                 if not problem and (member.issym() or member.islnk()):
                     problem = "a link"
                 elif not problem and not (member.isreg() or member.isdir()):
                     problem = "a special file"
                 check(member.name, problem, member.size if member.isreg() else 0)
-    return total
+    return total, skipped
+
+
+def _extraction_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
+    """Skip macOS metadata; otherwise Python's "data" filter, which refuses
+    anything that would land outside the destination -- a second line of
+    defense behind inspect_archive."""
+    if _is_macos_metadata(member.name):
+        return None
+    return tarfile.data_filter(member, dest_path)
 
 
 def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Path:
@@ -162,13 +189,12 @@ def extract_archive_to(target_dir: Path, archive: BinaryIO, filename: str) -> Pa
     archive.seek(0)
     if filename.endswith(".zip"):
         with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(target_dir)
+            zf.extractall(target_dir, members=[
+                i for i in zf.infolist() if not _is_macos_metadata(i.filename)])
     elif filename.endswith((".tar.gz", ".tgz", ".tar")):
         mode = "r:gz" if filename.endswith((".tar.gz", ".tgz")) else "r:"
         with tarfile.open(fileobj=archive, mode=mode) as tf:
-            # "data" refuses anything that would land outside target_dir,
-            # a second line of defense behind inspect_archive.
-            tf.extractall(target_dir, filter="data")
+            tf.extractall(target_dir, filter=_extraction_filter)
     else:
         raise ValueError(f"Unsupported archive format: {filename}")
 
@@ -216,7 +242,7 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str) -> dict:
 
     try:
         available = shutil.disk_usage(settings.uploads_dir).free - _FREE_SPACE_MARGIN
-        inspect_archive(archive, filename, max_total=max(available, 0))
+        _, skipped = inspect_archive(archive, filename, max_total=max(available, 0))
         extract_archive_to(upload_dir, archive, filename)
 
         valid, msg = validate_imagefolder(upload_dir)
@@ -228,11 +254,14 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str) -> dict:
             raise ValueError(f"Invalid dataset: {msg}")
 
         num_classes = detect_num_classes(upload_dir)
+        description = f"Uploaded: {filename}"
+        if skipped:
+            description += f"; skipped {skipped} macOS metadata file{'s' if skipped > 1 else ''}"
 
         with get_db() as conn:
             conn.execute(
                 "UPDATE datasets SET name=%s, path=%s, num_classes=%s, is_ready=%s, description=%s WHERE id=%s",
-                (safe_name, str(upload_dir), num_classes, 1, f"Uploaded: {filename}", ds_id),
+                (safe_name, str(upload_dir), num_classes, 1, description, ds_id),
             )
 
         return {
