@@ -30,6 +30,13 @@ router = APIRouter(prefix="/api")
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+def _dataset_status(row) -> str:
+    """See DatasetResponse.status."""
+    if row.get("copy_status") in ("copying", "failed"):
+        return row["copy_status"]
+    return "ready" if row["is_ready"] else "uploading"
+
+
 def _row_to_dataset(row) -> DatasetResponse:
     return DatasetResponse(
         id=row["id"],
@@ -40,7 +47,9 @@ def _row_to_dataset(row) -> DatasetResponse:
         is_ready=bool(row["is_ready"]),
         description=row["description"] or "",
         created_at=row["created_at"] or "",
-        uploaded_by=row["uploaded_by"] if "uploaded_by" in row.keys() else None,
+        uploaded_by=row.get("uploaded_by"),
+        status=_dataset_status(row),
+        status_detail=row.get("copy_error") if row.get("copy_status") == "failed" else None,
     )
 
 

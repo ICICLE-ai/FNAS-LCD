@@ -101,8 +101,12 @@ def index(request: Request, response: Response, submitted: int | None = Query(No
 
 @router.get("/datasets", response_class=HTMLResponse)
 def datasets_page(request: Request):
+    # Unlike the search form, list uploads that aren't ready (yet), with
+    # their status, so uploaders can follow them and see failures.
     with get_db() as conn:
-        datasets = _get_datasets(conn)
+        datasets = conn.execute(
+            "SELECT * FROM datasets WHERE is_ready=1 OR is_upload=1 ORDER BY id"
+        ).fetchall()
     return templates.TemplateResponse(request, "datasets.html", {
         "datasets": [_row_to_dataset(r) for r in datasets],
     })

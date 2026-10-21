@@ -20,6 +20,10 @@ class DatasetResponse(BaseModel):
     description: str = ""
     created_at: str = ""
     uploaded_by: Optional[str] = None
+    # "ready", or for an upload still in progress "uploading" / "copying"
+    # (to the training system), or "failed" with the reason in status_detail.
+    status: str = "ready"
+    status_detail: Optional[str] = None
 
     class Config:
         from_attributes = True
