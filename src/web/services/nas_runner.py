@@ -223,12 +223,13 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
 
     remote_path = ds_row["remote_path"]
     if not remote_path:
-        # Uploaded datasets live only in this container. Submitting anyway
+        # An upload gets a remote_path only once it has been copied to the
+        # training system (dataset_service.stage_upload). Submitting anyway
         # would fail later during input staging with a far less obvious error.
         _fail(job_id,
-              f"Dataset '{ds_row['name']}' is not available for remote training: "
-              f"it has no path on the training system. Only pre-registered "
-              f"datasets can be trained remotely.")
+              f"Dataset '{ds_row['name']}' is not ready for training: it hasn't "
+              f"been copied to the training system. An uploaded dataset can be "
+              f"trained once its status is Ready.")
         return None
 
     submitted_by = job.get("submitted_by")

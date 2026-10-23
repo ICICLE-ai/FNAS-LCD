@@ -22,6 +22,10 @@ UPLOADS_DIR = STORAGE_DIR / "uploads"
 CHECKPOINTS_DIR = STORAGE_DIR / "checkpoints"
 MODELS_DIR = STORAGE_DIR / "models"
 
+# Largest dataset archive accepted, in bytes. Enforced before an upload is
+# written to disk (see main.py), and stated on the upload page.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+
 # ── database (Postgres) ──────────────────────────────────────────────────────
 # Defaults match the `db` service in docker-compose.yml; override via env
 # vars for bare local dev against a different Postgres instance.
@@ -61,6 +65,10 @@ TAPIS_CLIENT_KEY = os.environ.get("TAPIS_CLIENT_KEY", "")
 TAPIS_REFRESH_TOKEN = os.environ.get("TAPIS_REFRESH_TOKEN", "")
 TAPIS_APP_ID = os.environ.get("TAPIS_APP_ID", "fnas-lcd-train")
 TAPIS_APP_VERSION = os.environ.get("TAPIS_APP_VERSION", "0.1.3")
+# The small app that unpacks an uploaded dataset on the execution system so
+# it can be trained (definition in tapis/, see dataset_service.stage_upload).
+TAPIS_UNPACK_APP_ID = os.environ.get("TAPIS_UNPACK_APP_ID", "fnas-lcd-unpack")
+TAPIS_UNPACK_APP_VERSION = os.environ.get("TAPIS_UNPACK_APP_VERSION", "0.1.0")
 TAPIS_SYSTEM = os.environ.get("TAPIS_SYSTEM", "pitzer-tapis")
 TAPIS_QUEUE = os.environ.get("TAPIS_QUEUE", "gpu-exp")
 # How the dataset reaches the training container:
@@ -146,6 +154,7 @@ class AppSettings:
     uploads_dir: Path = field(default_factory=lambda: UPLOADS_DIR)
     checkpoints_dir: Path = field(default_factory=lambda: CHECKPOINTS_DIR)
     models_dir: Path = field(default_factory=lambda: MODELS_DIR)
+    max_upload_bytes: int = MAX_UPLOAD_BYTES
     lookup_csv: Path = field(default_factory=lambda: LOOKUP_CSV)
     model_root: Path = field(default_factory=lambda: MODEL_ROOT)
     repo_root: Path = field(default_factory=lambda: REPO_ROOT)
@@ -173,6 +182,8 @@ class AppSettings:
     tapis_refresh_token: str = TAPIS_REFRESH_TOKEN
     tapis_app_id: str = TAPIS_APP_ID
     tapis_app_version: str = TAPIS_APP_VERSION
+    tapis_unpack_app_id: str = TAPIS_UNPACK_APP_ID
+    tapis_unpack_app_version: str = TAPIS_UNPACK_APP_VERSION
     tapis_system: str = TAPIS_SYSTEM
     tapis_queue: str = TAPIS_QUEUE
     tapis_stage_mode: str = TAPIS_STAGE_MODE

@@ -30,6 +30,13 @@ router = APIRouter(prefix="/api")
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+def _dataset_status(row) -> str:
+    """See DatasetResponse.status."""
+    if row.get("copy_status") in ("copying", "failed"):
+        return row["copy_status"]
+    return "ready" if row["is_ready"] else "uploading"
+
+
 def _row_to_dataset(row) -> DatasetResponse:
     return DatasetResponse(
         id=row["id"],
@@ -40,6 +47,9 @@ def _row_to_dataset(row) -> DatasetResponse:
         is_ready=bool(row["is_ready"]),
         description=row["description"] or "",
         created_at=row["created_at"] or "",
+        uploaded_by=row.get("uploaded_by"),
+        status=_dataset_status(row),
+        status_detail=row.get("copy_error") if row.get("copy_status") == "failed" else None,
     )
 
 
@@ -106,25 +116,40 @@ def get_dataset(dataset_id: int):
     return _row_to_dataset(row)
 
 
-@router.post("/datasets/upload", response_model=DatasetResponse)
-async def upload_dataset(
+# A plain `def` (not async) so FastAPI runs it in a worker thread: extracting
+# a multi-GB archive would otherwise block every other request meanwhile.
+@router.post(
+    "/datasets/upload",
+    response_model=DatasetResponse,
+    description="Upload a zip/tar archive in ImageFolder format, at most "
+                f"{dataset_service.format_size(settings.max_upload_bytes)}.",
+)
+def upload_dataset(
     name: str = Query(..., description="Dataset display name"),
     file: UploadFile = File(...),
+    session: dict = Depends(get_session),
 ):
-    """Upload a zip/tar archive in ImageFolder format."""
+    # Uploads are attributed, like jobs: only the uploader may delete one.
+    uploaded_by = session.get("tapis_username")
+    if not uploaded_by:
+        raise HTTPException(
+            403, "Connect your Tapis account (GET /account) before uploading a dataset."
+        )
+
     if not file.filename:
         raise HTTPException(400, "Filename is required")
 
     allowed_ext = (".zip", ".tar", ".tar.gz", ".tgz")
     if not any(file.filename.endswith(ext) for ext in allowed_ext):
-        raise HTTPException(400, f"Unsupported format. Allowed: {allowed_ext}")
+        raise HTTPException(400, f"Unsupported format. Allowed: {', '.join(allowed_ext)}")
 
-    file_bytes = await file.read()
-    if len(file_bytes) > 10 * 1024 * 1024 * 1024:  # 10 GB
-        raise HTTPException(400, "File too large (max 10 GB)")
+    if file.size is not None and file.size > settings.max_upload_bytes:
+        raise HTTPException(413, "File too large: the maximum upload size is "
+                                 f"{dataset_service.format_size(settings.max_upload_bytes)}.")
 
     try:
-        info = dataset_service.add_uploaded_dataset(name, file_bytes, file.filename)
+        info = dataset_service.add_uploaded_dataset(
+            name, file.file, file.filename, uploaded_by=uploaded_by)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -136,20 +161,48 @@ async def upload_dataset(
 
 
 @router.delete("/datasets/{dataset_id}", response_model=MessageResponse)
-def delete_dataset(dataset_id: int):
+def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
+    """Delete an uploaded dataset. Only its uploader may, and only while no
+    job has used it: jobs keep a reference to their dataset, so deleting it
+    would mean erasing those jobs' records."""
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "Dataset not found")
-    if not row["is_upload"]:
-        raise HTTPException(400, "Cannot delete pre-configured datasets")
+        # Locked until the delete commits, so no job can start using it meanwhile.
+        row = conn.execute(
+            "SELECT * FROM datasets WHERE id=%s FOR UPDATE", (dataset_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Dataset not found")
+        if not row["is_upload"]:
+            raise HTTPException(400, "Cannot delete pre-configured datasets")
+        if not session.get("tapis_username") or row["uploaded_by"] != session["tapis_username"]:
+            raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
+        if row["copy_status"] == "copying":
+            raise HTTPException(
+                409, "This dataset is still being copied to the training system. "
+                     "Try again once it is ready or has failed."
+            )
+        used = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE dataset_id=%s", (dataset_id,)
+        ).fetchone()["n"]
+        if used:
+            raise HTTPException(
+                409, f"This dataset can't be deleted: {used} job(s) used it, and "
+                     f"deleting it would erase their records."
+            )
 
-    import shutil
-    ds_path = Path(row["path"])
-    if ds_path.is_dir():
-        shutil.rmtree(ds_path, ignore_errors=True)
-
-    with get_db() as conn:
+        # Its copy on the execution system goes first: if that can't be
+        # removed, nothing is deleted and the user can simply retry.
+        if row["copy_status"] is not None:
+            from ..services import tapis_service
+            try:
+                tapis_service.delete_upload_dir(
+                    dataset_service.remote_upload_dir(row["id"], row["name"]))
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    502, f"Couldn't delete the dataset's copy on the training system, "
+                         f"so nothing was deleted: {e}"
+                )
+        dataset_service.delete_local_files(row["id"], row["name"])
         conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
     return MessageResponse(message=f"Dataset {dataset_id} deleted")
 

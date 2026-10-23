@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from ..config import settings
 from ..database import get_db
 from ..deps import apply_session_cookie, get_session
 from .api import _row_to_dataset, _row_to_job
@@ -17,6 +18,8 @@ router = APIRouter()
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+templates.env.globals["max_upload_bytes"] = settings.max_upload_bytes
+templates.env.globals["max_upload_label"] = dataset_service.format_size(settings.max_upload_bytes)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -98,8 +101,12 @@ def index(request: Request, response: Response, submitted: int | None = Query(No
 
 @router.get("/datasets", response_class=HTMLResponse)
 def datasets_page(request: Request):
+    # Unlike the search form, list uploads that aren't ready (yet), with
+    # their status, so uploaders can follow them and see failures.
     with get_db() as conn:
-        datasets = _get_datasets(conn)
+        datasets = conn.execute(
+            "SELECT * FROM datasets WHERE is_ready=1 OR is_upload=1 ORDER BY id"
+        ).fetchall()
     return templates.TemplateResponse(request, "datasets.html", {
         "datasets": [_row_to_dataset(r) for r in datasets],
     })
@@ -110,32 +117,43 @@ def dataset_upload_form(request: Request):
     return templates.TemplateResponse(request, "dataset_upload.html")
 
 
+# A plain `def` (not async) so FastAPI runs it in a worker thread: extracting
+# a multi-GB archive would otherwise block every other request meanwhile.
 @router.post("/datasets/upload", response_class=HTMLResponse)
-async def dataset_upload_handler(
+def dataset_upload_handler(
     request: Request,
+    response: Response,
     name: str = Form(...),
     file: UploadFile = File(...),
+    session: dict = Depends(get_session),
 ):
+    def form_error(message: str):
+        page = templates.TemplateResponse(request, "dataset_upload.html", {"error": message})
+        return apply_session_cookie(response, page)
+
+    # Uploads are attributed, like jobs: only the uploader may delete one.
+    if not session.get("tapis_username"):
+        return form_error("Connect your Tapis account before uploading a dataset.")
+
     if not file.filename:
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": "Filename is required",
-        })
+        return form_error("Filename is required")
 
     allowed = (".zip", ".tar", ".tar.gz", ".tgz")
     if not any(file.filename.endswith(ext) for ext in allowed):
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": f"Unsupported format. Allowed: {allowed}",
-        })
+        return form_error(f"Unsupported format. Allowed: {', '.join(allowed)}")
 
-    file_bytes = await file.read()
+    if file.size is not None and file.size > settings.max_upload_bytes:
+        return form_error(f"File too large: the maximum upload size is "
+                          f"{dataset_service.format_size(settings.max_upload_bytes)}.")
+
     try:
-        info = dataset_service.add_uploaded_dataset(name, file_bytes, file.filename)
+        info = dataset_service.add_uploaded_dataset(
+            name, file.file, file.filename, uploaded_by=session["tapis_username"])
     except Exception as e:
-        return templates.TemplateResponse(request, "dataset_upload.html", {
-            "error": str(e),
-        })
+        return form_error(str(e))
 
-    return RedirectResponse(f"/datasets/{info['id']}", status_code=303)
+    redirect = RedirectResponse(f"/datasets/{info['id']}", status_code=303)
+    return apply_session_cookie(response, redirect)
 
 
 @router.get("/datasets/{dataset_id}", response_class=HTMLResponse)

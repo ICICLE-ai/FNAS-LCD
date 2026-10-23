@@ -11,8 +11,13 @@ from settings, no class hierarchy, and each function maps to one Tapis call.
 
 from __future__ import annotations
 
+import io
+import posixpath
+import secrets
 import threading
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from ..config import settings
 
@@ -340,6 +345,17 @@ def _call(fn_name: str, tapis_username: Optional[str] = None,
 
 # ── submit ─────────────────────────────────────────────────────────────────
 
+def _work_base() -> str:
+    if not settings.tapis_work_base:
+        raise TapisNotConfigured(
+            "TAPIS_WORK_BASE must be set to a directory writable by the "
+            "execution system's effective user (e.g. /fs/ess/<project>/<user>). "
+            "Without it, jobs inherit the system's default working directory, "
+            "which is typically not writable and fails during input processing."
+        )
+    return settings.tapis_work_base.rstrip("/")
+
+
 def build_job_body(
     *,
     name: str,
@@ -379,14 +395,7 @@ def build_job_body(
     if warmup is not None:
         warmup = min(warmup, max(epochs - 1, 0))
 
-    if not settings.tapis_work_base:
-        raise TapisNotConfigured(
-            "TAPIS_WORK_BASE must be set to a directory writable by the "
-            "execution system's effective user (e.g. /fs/ess/<project>/<user>). "
-            "Without it, jobs inherit the system's default working directory, "
-            "which is typically not writable and fails during input processing."
-        )
-    work = settings.tapis_work_base.rstrip("/")
+    work = _work_base()
     job_dir = f"{work}/tapis-jobs/" + "${JobUUID}"
 
     app_args = [
@@ -530,3 +539,168 @@ def download_output(uuid: str, name: str, tapis_username: Optional[str] = None,
     if isinstance(data, str):
         data = data.encode()
     return data
+
+
+# ── uploaded datasets ──────────────────────────────────────────────────────
+#
+# An upload becomes trainable by being copied to the execution system, into
+# its own folder under uploads_base(), and unpacked there by a small Tapis
+# app (tapis/fnas-lcd-unpack-*.app.json). Training then bind-mounts that
+# folder exactly like a pre-configured dataset. All of it runs as the shared
+# service account, like training.
+
+# The unpack app's command line hardcodes this name: the service uploads the
+# archive as <dataset folder>/dataset.tar and binds that folder at /dataset.
+UNPACK_ARCHIVE_NAME = "dataset.tar"
+
+
+def uploads_base() -> str:
+    """Folder on the execution system that holds uploaded datasets."""
+    return f"{_work_base()}/datasets/uploads"
+
+
+def _files_call(fn_name: str, **kwargs):
+    """Invoke a Files API method as the shared service account, retrying once
+    with a fresh session on failure, like _call does for jobs."""
+    from tapipy.errors import NotFoundError
+
+    try:
+        return getattr(get_client().files, fn_name)(**kwargs)
+    except NotFoundError:
+        raise  # a missing path stays missing; no point retrying
+    except Exception:
+        return getattr(get_client(force_refresh=True).files, fn_name)(**kwargs)
+
+
+# Files API paths are relative to the system's rootDir, which is "/" on the
+# execution system, so an absolute path is passed without its leading slash.
+
+def make_dir(path: str) -> None:
+    _files_call("mkdir", systemId=settings.tapis_system, path=path.lstrip("/"))
+
+
+def delete_upload_dir(path: str) -> None:
+    """Delete one uploaded dataset's folder on the execution system.
+
+    Refuses anything but a folder directly inside uploads_base(), so neither
+    a bug nor a bad database value can remove anything else in the service
+    account's space: its other datasets, job folders or the training image.
+    A folder that is already gone counts as deleted.
+    """
+    from tapipy.errors import NotFoundError
+
+    base = uploads_base()
+    target = posixpath.normpath(path)
+    if posixpath.dirname(target) != base:
+        raise ValueError(f"refusing to delete {path!r}: not an upload folder in {base}")
+    try:
+        _files_call("delete", systemId=settings.tapis_system, path=target.lstrip("/"))
+    except NotFoundError:
+        pass
+
+
+def delete_upload_archive(dataset_dir: str) -> None:
+    """Delete the archive in one uploaded dataset's folder on the execution
+    system, once the unpack job has extracted it."""
+    base = uploads_base()
+    target = posixpath.normpath(dataset_dir)
+    if posixpath.dirname(target) != base:
+        raise ValueError(f"refusing to delete in {dataset_dir!r}: not an upload folder in {base}")
+    _files_call("delete", systemId=settings.tapis_system,
+                path=f"{target}/{UNPACK_ARCHIVE_NAME}".lstrip("/"))
+
+
+class _MultipartFileBody:
+    """A multipart/form-data body holding one file, read from disk in chunks
+    as it is sent. requests streams any body that has read() and a length,
+    so the file never has to fit in memory -- tapipy's own upload helper
+    reads it whole, and an upload can be many GB."""
+
+    def __init__(self, path: Path):
+        self.boundary = secrets.token_hex(16)
+        head = (f"--{self.boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n").encode()
+        tail = f"\r\n--{self.boundary}--\r\n".encode()
+        self._file = open(path, "rb")
+        self._parts = [io.BytesIO(head), self._file, io.BytesIO(tail)]
+        self._length = len(head) + path.stat().st_size + len(tail)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def read(self, size: int = -1) -> bytes:
+        chunks = []
+        while self._parts and (size < 0 or size > 0):
+            data = self._parts[0].read(size)
+            if not data:
+                self._parts.pop(0)
+                continue
+            chunks.append(data)
+            if size > 0:
+                size -= len(data)
+        return b"".join(chunks)
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def upload_file(local_path: Path, remote_path: str) -> None:
+    """Upload a local file to `remote_path` on the execution system as the
+    shared service account, streaming it from disk (Files API "insert")."""
+    import requests
+
+    url_path = quote(remote_path.lstrip("/"))
+
+    def attempt(client):
+        body = _MultipartFileBody(local_path)
+        try:
+            return requests.post(
+                f"{client.base_url}/v3/files/ops/{settings.tapis_system}/{url_path}",
+                data=body,
+                headers={"X-Tapis-Token": client.get_access_jwt(),
+                         "Content-Type": f"multipart/form-data; boundary={body.boundary}"},
+                # Generous read timeout: Tapis may only answer once it has
+                # moved the whole file on to the execution system.
+                timeout=(30, 3600),
+            )
+        finally:
+            body.close()
+
+    # Retry once with a fresh session, as _call does: an expired token is
+    # refused with a 401, or by the server closing the connection mid-send.
+    try:
+        resp = attempt(get_client())
+        retry = resp.status_code == 401
+    except requests.ConnectionError:
+        retry = True
+    if retry:
+        resp = attempt(get_client(force_refresh=True))
+    if resp.status_code >= 400:
+        raise RuntimeError(f"file upload failed ({resp.status_code}): {resp.text[:300]}")
+
+
+def submit_unpack(*, dataset_dir: str, name: str, uploaded_by: Optional[str] = None) -> str:
+    """Submit the job that unpacks <dataset_dir>/dataset.tar in place on the
+    execution system, as the shared service account. Returns the job UUID."""
+    work = _work_base()
+    job_dir = f"{work}/tapis-jobs/" + "${JobUUID}"
+    body = {
+        "name": name,
+        "appId": settings.tapis_unpack_app_id,
+        "appVersion": settings.tapis_unpack_app_version,
+        "description": "FNAS-LCD dataset unpack"
+                       + (f" -- uploaded via fnas-lcd by {uploaded_by}" if uploaded_by else ""),
+        # Same writable directories as training jobs (see build_job_body).
+        "execSystemInputDir": job_dir,
+        "execSystemExecDir": job_dir,
+        "execSystemOutputDir": f"{job_dir}/output",
+        "archiveSystemId": settings.tapis_system,
+        "archiveSystemDir": f"{work}/tapis-archive/" + "${JobUUID}",
+        "parameterSet": {
+            "containerArgs": [
+                {"name": "dataset_bind", "arg": f"--bind {dataset_dir}:/dataset"},
+            ],
+        },
+    }
+    return _call("submitJob", **body).uuid

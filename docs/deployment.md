@@ -15,8 +15,9 @@ Pushing to `main` triggers `.github/workflows/deploy.yaml`
    system package requirements — not a Dockerfile; ICICLE builds the
    image itself from this plus an official base Dockerfile it fetches).
 2. Builds the image and pushes it to ICICLE's container registry.
-3. Triggers a Tapis Pods deployment for the pod named in
-   `icicle-service.yaml`'s `pod-name`.
+3. Sets the image of the pod named in `icicle-service.yaml`'s `pod-name`
+   to the new build, restarts the pod, and checks that its `/health`
+   reports the new build (this step currently fails; see Current status).
 
 `component-info.yaml` is separate — ICICLE catalog metadata (owner,
 classification, license, etc.), not part of the build or deploy mechanics.
@@ -27,37 +28,63 @@ maintainer/team to confirm rather than guessed.
 ## Required configuration
 
 The repo's `.env.example` documents every setting the running app reads.
-Locally, `docker compose` supplies these directly. **On a pod, nothing
-currently configures them** — this is the open item below. At minimum, a
+Locally, `docker compose` supplies these directly. On the ICICLE pod they
+are set on the pod itself, in TapisUI (environment variables, with secrets
+in its secret map); the deploy pipeline doesn't touch them. At minimum, a
 running pod needs:
 
 - Postgres connection info (`POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB`)
 - Object storage (`S3_ENDPOINT_URL`/`ACCESS_KEY`/`SECRET_KEY`/`BUCKET`)
 - If remote training is enabled (`TAPIS_ENABLED=1`): a Tapis OAuth client
-  (`TAPIS_CLIENT_ID`/`KEY`) and a way to obtain credentials — either
-  `TAPIS_REFRESH_TOKEN` (a shared fallback identity) or
-  `REQUIRE_TAPIS_TOKEN=1` (identity comes from the hosting platform
-  instead, per `architecture.md`)
+  (`TAPIS_CLIENT_ID`/`KEY`); the refresh token of the shared service
+  account that every training job runs under (seeded once with
+  `TAPIS_REFRESH_TOKEN` or `bootstrap_refresh_token()`; Tapis rotates it on
+  every use, so the service keeps the current one in its database); and
+  `TAPIS_WORK_BASE`, a directory on the execution system that account can
+  write to. Users are identified separately: by the `X-Tapis-Token` cookie
+  a hosting platform's login sets, or by connecting an account on the
+  Account page (see `architecture.md`).
 
-## Current status
+## Tapis apps
 
-**The pod does not start.** `icicle-service.yaml`'s `pod-name` is
-`fnaslcd` (a required fix — a value containing a hyphen fails), and with
-that fix the deploy pipeline itself succeeds end to end: it builds,
-pushes, and successfully triggers the Tapis Pods deployment. But the pod
-itself crashes immediately after starting
-(`https://fnaslcd.pods.icicleai.tapis.io/health` returns the platform's
-own "this pod failed to start" page, not a response from this app).
+Training jobs run the `fnas-lcd-train` app (`tapis/fnas-lcd-train-0.1.3.app.json`).
+Uploaded datasets additionally need the small `fnas-lcd-unpack` app
+(`tapis/fnas-lcd-unpack-0.1.0.app.json`), which unpacks an uploaded dataset in
+place on the execution system. Until it is registered and shared, uploads fail
+at the copying step, and the dataset's page shows Tapis's error. To register
+it, once:
 
-The most likely cause is the configuration gap above: the deploy pipeline
-builds and pushes the *image*, but nothing in it configures the running
-container's environment variables, and this app cannot start at all
-without at least a database to connect to. **How ICICLE wants runtime
-secrets/config injected into a pod is, as of this writing, an open
-question** — not something resolved in this repo. Resolving it is the
-prerequisite for everything else here.
+1. Create the app from the JSON file, under any Tapis account in the tenant
+   (TapisUI: Apps → create, pasting the JSON; or `POST /v3/apps`).
+2. Share it with the account the service runs jobs as (the one whose
+   refresh token the pod holds), so that account may launch it:
+   `POST /v3/apps/share/fnas-lcd-unpack` with `{"users": ["<that account>"]}`.
 
-Pod logs (referenced by the platform's own error page) have not been
-accessible — pod-level access on the Tapis Pods platform appears to be
-separate from repository access and was not available while diagnosing
-this.
+Its paths (`/fs/ess/PAS2699/...`), queue (`cpu`) and `--account=PAS2699` are
+Pitzer-specific, like the training app's. The service sends its own job
+directories (from `TAPIS_WORK_BASE`) with every job; the app and version it
+uses can be changed with `TAPIS_UNPACK_APP_ID`/`TAPIS_UNPACK_APP_VERSION`.
+
+## Current status (October 2026)
+
+**The pod runs** at https://fnaslcd.pods.icicleai.tapis.io, behind the
+pod's Tapis login. That login sets the `X-Tapis-Token` cookie the app uses
+to identify users (`REQUIRE_TAPIS_TOKEN` isn't set). ICICLE staff
+configured the database, object storage and Tapis settings on the pod. Its
+logs are visible in TapisUI.
+
+**Training** runs on OSC Pitzer under one shared service account, whose
+refresh token the pod holds, on the PAS2699 allocation
+(`TAPIS_WORK_BASE=/fs/ess/PAS2699/jhyan`). Uploaded datasets are copied
+there before they can be trained (see "Tapis apps" above).
+
+**The deploy pipeline stops before restarting the pod.** `deploy.yaml`
+uses v2.2.2 of the shared pipeline. Its "Deploy image and verify rollout"
+step points the pod at the image it just built, by digest
+(`ghcr.io/icicle-ai/fnas-lcd@sha256:…`), and then restarts the pod. Tapis
+Pods currently rejects digest image references (HTTP 400), so the step
+fails before the restart. The image is also pushed as
+`ghcr.io/icicle-ai/fnas-lcd:<service-version>`, which is what the pod
+runs, so restarting the pod in TapisUI deploys it. Even once that's fixed,
+the health check would fail, because `/health` sits behind the pod's Tapis
+login. Both need a fix on ICICLE's side.
