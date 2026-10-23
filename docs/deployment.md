@@ -79,12 +79,12 @@ refresh token the pod holds, on the PAS2699 allocation
 there before they can be trained (see "Tapis apps" above).
 
 **The deploy pipeline stops before restarting the pod.** `deploy.yaml`
-uses the shared pipeline's `@main`, which became v2.2.1 in October 2026.
-Its "Deploy image and verify rollout" step sets the pod's image to
-`ghcr.io/icicle-ai/fnas-lcd:<service-version>` and then restarts the pod.
-While `service-version` stays at 0.1.0 the image name never changes, so
-Tapis rejects the update as making no change, and the step fails before
-the restart. The new image is still built and pushed under the same tag,
-so restarting the pod in TapisUI deploys it. Even once that's fixed, the
-health check would fail, because `/health` sits behind the pod's Tapis
+uses v2.2.2 of the shared pipeline. Its "Deploy image and verify rollout"
+step points the pod at the image it just built, by digest
+(`ghcr.io/icicle-ai/fnas-lcd@sha256:…`), and then restarts the pod. Tapis
+Pods currently rejects digest image references (HTTP 400), so the step
+fails before the restart. The image is also pushed as
+`ghcr.io/icicle-ai/fnas-lcd:<service-version>`, which is what the pod
+runs, so restarting the pod in TapisUI deploys it. Even once that's fixed,
+the health check would fail, because `/health` sits behind the pod's Tapis
 login. Both need a fix on ICICLE's side.
