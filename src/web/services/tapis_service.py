@@ -599,6 +599,17 @@ def delete_upload_dir(path: str) -> None:
         pass
 
 
+def delete_upload_archive(dataset_dir: str) -> None:
+    """Delete the archive in one uploaded dataset's folder on the execution
+    system, once the unpack job has extracted it."""
+    base = uploads_base()
+    target = posixpath.normpath(dataset_dir)
+    if posixpath.dirname(target) != base:
+        raise ValueError(f"refusing to delete in {dataset_dir!r}: not an upload folder in {base}")
+    _files_call("delete", systemId=settings.tapis_system,
+                path=f"{target}/{UNPACK_ARCHIVE_NAME}".lstrip("/"))
+
+
 class _MultipartFileBody:
     """A multipart/form-data body holding one file, read from disk in chunks
     as it is sent. requests streams any body that has read() and a length,

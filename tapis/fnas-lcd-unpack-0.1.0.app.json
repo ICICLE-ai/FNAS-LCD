@@ -28,7 +28,7 @@
         {
           "name": "unpack",
           "description": "The service uploads the dataset's archive as dataset.tar into the dataset's folder, and binds that folder at /dataset with a containerArg named dataset_bind.",
-          "arg": "sh -c 'tar -xf /dataset/dataset.tar -C /dataset && rm /dataset/dataset.tar'",
+          "arg": "tar -xf /dataset/dataset.tar -C /dataset",
           "inputMode": "FIXED"
         }
       ],

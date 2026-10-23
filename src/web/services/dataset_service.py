@@ -405,6 +405,11 @@ def stage_upload(ds_id: int) -> None:
         _fail_copy(ds_id, name, f"Copying to the training system failed: {e}")
         return
 
+    try:
+        tapis_service.delete_upload_archive(remote_dir)
+    except Exception:  # noqa: BLE001 - deleting the dataset removes it too
+        pass
+
     with get_db() as conn:
         conn.execute(
             "UPDATE datasets SET remote_path=%s, path=%s, copy_status='ready', copy_error=NULL, "
