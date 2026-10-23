@@ -368,7 +368,8 @@ def _fail_copy(ds_id: int, name: str, reason: str) -> None:
     try:
         tapis_service.delete_upload_dir(remote_upload_dir(ds_id, name))
     except Exception as e:  # noqa: BLE001 - deleting the dataset retries this
-        print(f"WARNING: could not remove the remote folder of failed upload {ds_id}: {e}")
+        print(f"WARNING: could not remove the remote folder of failed upload {ds_id}: {e}",
+              flush=True)
 
 
 def stage_upload(ds_id: int) -> None:
@@ -407,8 +408,9 @@ def stage_upload(ds_id: int) -> None:
 
     try:
         tapis_service.delete_upload_archive(remote_dir)
-    except Exception:  # noqa: BLE001 - deleting the dataset removes it too
-        pass
+    except Exception as e:  # noqa: BLE001 - the dataset is usable regardless
+        print(f"WARNING: could not remove the archive from the remote folder of upload {ds_id}: {e}",
+              flush=True)
 
     with get_db() as conn:
         conn.execute(
