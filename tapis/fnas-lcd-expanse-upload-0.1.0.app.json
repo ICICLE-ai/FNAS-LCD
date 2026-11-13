@@ -1,0 +1,78 @@
+{
+  "id": "fnas-lcd-expanse-upload",
+  "version": "0.1.0",
+  "description": "FNAS-LCD: copy an uploaded dataset onto SDSC Expanse (Tapis downloads the archive into the job's folder and the job unpacks it there), or delete one. Submitted by the FNAS-LCD service with each user's own login.",
+  "runtime": "SINGULARITY",
+  "runtimeOptions": [
+    "SINGULARITY_RUN"
+  ],
+  "containerImage": "docker://ghcr.io/icicle-ai/fnas-lcd:0.1.0",
+  "jobType": "BATCH",
+  "strictFileInputs": true,
+  "jobAttributes": {
+    "description": "FNAS-LCD dataset upload or delete",
+    "execSystemId": "expanse-tapis-static",
+    "execSystemExecDir": "/jobs/fnas-lcd/uploads/${JobUUID}",
+    "execSystemInputDir": "/jobs/fnas-lcd/uploads/${JobUUID}",
+    "execSystemOutputDir": "/jobs/fnas-lcd/uploads/${JobUUID}/output",
+    "execSystemLogicalQueue": "tapisShared",
+    "archiveOnAppError": true,
+    "nodeCount": 1,
+    "coresPerNode": 2,
+    "memoryMB": 8000,
+    "maxMinutes": 120,
+    "parameterSet": {
+      "appArgs": [
+        {
+          "name": "mode",
+          "arg": "upload",
+          "inputMode": "REQUIRED",
+          "description": "src/training/expanse_job.py's mode: \"upload\" unpacks the archive input into dataset/ in the job's folder; \"delete <upload job id>\" deletes the folder of an upload made by the same Tapis user."
+        }
+      ],
+      "containerArgs": [
+        {
+          "name": "start-folder",
+          "arg": "--pwd /app",
+          "inputMode": "FIXED",
+          "description": "Start in /app, so the image's entrypoint.sh runs."
+        },
+        {
+          "name": "job-folder",
+          "arg": "--bind $PWD:/workspace",
+          "inputMode": "FIXED",
+          "description": "The job's own folder, as /workspace."
+        },
+        {
+          "name": "datasets",
+          "arg": "--bind /expanse/lustre/scratch/harvest/temp_project/jobs/fnas-lcd/uploads:/datasets",
+          "inputMode": "FIXED",
+          "description": "Every upload job's folder, as /datasets/<upload job id>, for delete."
+        }
+      ],
+      "schedulerOptions": [
+        {
+          "name": "allocation",
+          "arg": "-A uot260",
+          "inputMode": "FIXED",
+          "description": "The Expanse allocation ICICLE's services charge their jobs to."
+        },
+        {
+          "name": "singularity-cache",
+          "inputMode": "FIXED",
+          "arg": "--export=ALL,SINGULARITY_CACHEDIR=/expanse/lustre/scratch/harvest/temp_project/.cache/singularity/cache,APPTAINER_CACHEDIR=/expanse/lustre/scratch/harvest/temp_project/.cache/singularity/cache",
+          "description": "Keep converted images in the shared cache in harvest's scratch space."
+        }
+      ]
+    },
+    "fileInputs": [
+      {
+        "name": "archive",
+        "inputMode": "OPTIONAL",
+        "targetPath": "dataset.tar",
+        "autoMountLocal": false,
+        "description": "The dataset as a plain tar; the service gives a temporary link to it."
+      }
+    ]
+  }
+}

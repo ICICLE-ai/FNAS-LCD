@@ -3,8 +3,25 @@
 
 {% block content %}
 <h1>Architecture Search</h1>
+{% if tapis_enabled %}
+<p class="muted">Submits a job that searches for the best architecture under your
+budget, trains it on SDSC Expanse with your ICICLE login, and exports it.</p>
+
+<div class="alert alert-info">
+    Limits on SDSC Expanse:
+    <ul>
+        <li>A training job may wait in Expanse's queue for compute resources before it starts.</li>
+        <li>A training job is stopped after {{ max_job_minutes // 60 }} h {{ max_job_minutes % 60 }} min
+            ({{ max_job_minutes }} minutes).</li>
+        <li>At most {{ jobs_per_user }} of your jobs run at a time; more wait their turn.</li>
+        <li>Datasets and trained models are kept on Expanse under an account shared by
+            ICICLE's services, so other ICICLE users can access them.</li>
+    </ul>
+</div>
+{% else %}
 <p class="muted">Submits a job that searches for the best architecture under your
 budget and exports it (demo: training is skipped).</p>
+{% endif %}
 
 {% if error %}
 <div class="alert alert-error">{{ error }}</div>

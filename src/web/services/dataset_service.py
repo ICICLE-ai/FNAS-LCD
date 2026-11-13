@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import shutil
 import stat
 import tarfile
 import threading
-import time
 import zipfile
 from pathlib import Path
 from typing import BinaryIO
 
 from ..config import settings
+from ..database import get_db
+from . import tapis_service, upload_links, user_tokens
 
 # Disk space left free when deciding whether an upload fits, so a dataset
 # never fills the disk completely.
@@ -246,7 +248,6 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_b
     safe_name = _sanitize_name(name)
 
     # Build a unique directory name
-    from ..database import get_db
     try:
         with get_db() as conn:
             # Reserve an ID by inserting placeholder
@@ -280,8 +281,8 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_b
             description += f"; skipped {skipped} macOS metadata file{'s' if skipped > 1 else ''}"
 
         # With remote training on, the dataset becomes ready only once it has
-        # been copied to the execution system (stage_upload); until then it
-        # isn't offered for search or training.
+        # been copied to Expanse (stage_upload); until then it isn't offered
+        # for search or training.
         staged = settings.tapis_enabled
         with get_db() as conn:
             conn.execute(
@@ -310,23 +311,24 @@ def add_uploaded_dataset(name: str, archive: BinaryIO, filename: str, uploaded_b
         raise
 
 
-# ── copying uploads to the execution system ────────────────────────────────
+# ── copying uploads to Expanse ─────────────────────────────────────────────
 #
-# Training runs on the HPC system, which can't see this container's disk. So
-# once an upload is validated here, stage_upload copies it there in the
-# background: it re-packs the validated folder into a plain tar, uploads that
-# with Tapis, and runs the small unpack app. Then the dataset is ready for
-# training, exactly like a pre-configured one, and nothing of it is kept on
-# this container's disk (which a pod restart wipes anyway).
+# Training runs on Expanse, which can't see this container's disk. So once an
+# upload is validated here, stage_upload copies it there in the background,
+# with the uploader's own Tapis login: it re-packs the validated folder into a
+# plain tar and runs the upload app. Tapis downloads the tar into that job's
+# folder from a temporary link to this service (upload_links), and the job
+# unpacks it there. Then the dataset is ready for training, and nothing of it
+# is kept on this container's disk (which a pod restart wipes anyway).
 
-_INTERRUPTED = ("Copying to the training system was interrupted by a service restart. "
+_INTERRUPTED = ("Copying to Expanse was interrupted by a service restart. "
                 "Please upload the dataset again.")
 
 
-def remote_upload_dir(ds_id: int, name: str) -> str:
-    """Where an upload lives on the execution system."""
-    from . import tapis_service
-    return f"{tapis_service.uploads_base()}/{ds_id}_{name}"
+def _set_dataset(ds_id: int, **columns) -> None:
+    assignments = ", ".join(f"{column}=%s" for column in columns)
+    with get_db() as conn:
+        conn.execute(f"UPDATE datasets SET {assignments} WHERE id=%s", (*columns.values(), ds_id))
 
 
 def _plain_entry(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -356,81 +358,174 @@ def _repack(src_dir: Path, tar_path: Path) -> None:
 
 
 def _fail_copy(ds_id: int, name: str, reason: str) -> None:
-    from ..database import get_db
-    from . import tapis_service
-
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE datasets SET copy_status='failed', copy_error=%s WHERE id=%s",
-            (reason, ds_id),
-        )
+    _set_dataset(ds_id, copy_status="failed", copy_error=reason, is_ready=0)
     delete_local_files(ds_id, name)
-    try:
-        tapis_service.delete_upload_dir(remote_upload_dir(ds_id, name))
-    except Exception as e:  # noqa: BLE001 - deleting the dataset retries this
-        print(f"WARNING: could not remove the remote folder of failed upload {ds_id}: {e}",
-              flush=True)
+
+
+def _run_to_end(uuid: str, uploader: str, what: str) -> None:
+    """Wait for an upload or delete job to end; raise unless it finished."""
+    state = tapis_service.watch(uuid, uploader)
+    if state != "FINISHED":
+        detail = tapis_service.failure_detail(uuid, uploader, state, 1000)
+        raise RuntimeError(f"the {what} job ({uuid}) ended {state}: {detail}")
+
+
+def _finish_upload(ds_id: int, uuid: str, uploader: str) -> None:
+    """Wait for an upload job to end, then mark its dataset ready (or raise)."""
+    _run_to_end(uuid, uploader, "upload")
+    path = tapis_service.dataset_path(uuid)
+    _set_dataset(ds_id, remote_path=path, path=path, copy_status="ready", copy_error=None, is_ready=1)
 
 
 def stage_upload(ds_id: int) -> None:
-    """Copy one validated upload to the execution system and unpack it
-    there, then mark it ready for training -- or failed, with the reason."""
-    from ..database import get_db
-    from . import tapis_service
-
+    """Copy one validated upload onto Expanse and unpack it there, then mark
+    it ready for training -- or failed, with the reason."""
     with get_db() as conn:
         row = conn.execute("SELECT * FROM datasets WHERE id=%s", (ds_id,)).fetchone()
-    name = row["name"]
+    name, uploader = row["name"], row["uploaded_by"]
     local_dir = local_upload_dir(ds_id, name)
     tar_path = local_dir.with_name(local_dir.name + ".tar")
 
     try:
-        remote_dir = remote_upload_dir(ds_id, name)
         _repack(local_dir, tar_path)
-        tapis_service.make_dir(remote_dir)
-        tapis_service.upload_file(tar_path, f"{remote_dir}/{tapis_service.UNPACK_ARCHIVE_NAME}")
-        tar_path.unlink()
-
-        uuid = tapis_service.submit_unpack(
-            dataset_dir=remote_dir, name=f"fnas-lcd-unpack-dataset-{ds_id}",
-            uploaded_by=row["uploaded_by"])
-        while (state := tapis_service.get_status(uuid)) not in tapis_service.TERMINAL_STATES:
-            time.sleep(settings.tapis_poll_seconds)
-        if state != "FINISHED":
-            detail = tapis_service.get_last_message(uuid) or state
-            log = tapis_service.download_output(uuid, tapis_service.LOG_FILE)
-            if log:
-                detail += "\n" + log.decode(errors="replace")[-1000:]
-            raise RuntimeError(f"the unpack job ({uuid}) ended {state}: {detail}")
+        link = upload_links.create(tar_path)
+        try:
+            uuid = tapis_service.submit_upload(
+                user_tokens.wait_for(uploader), source_url=link,
+                name=f"fnas-lcd-upload-dataset-{ds_id}", uploaded_by=uploader)
+            _set_dataset(ds_id, remote_job_uuid=uuid)
+            # Once Tapis has copied the archive into the job's folder, neither
+            # the link nor this container's copy is needed.
+            tapis_service.watch(uuid, uploader, done=lambda s: s not in tapis_service.INPUT_STATES)
+        finally:
+            upload_links.revoke(link)
+        tar_path.unlink(missing_ok=True)
+        _finish_upload(ds_id, uuid, uploader)
     except Exception as e:  # noqa: BLE001
-        _fail_copy(ds_id, name, f"Copying to the training system failed: {e}")
-        return
+        _fail_copy(ds_id, name, f"Copying to Expanse failed: {e}")
 
+
+# ── deleting uploads from Expanse ──────────────────────────────────────────
+#
+# A user's own login can't delete FNAS-LCD's files on Expanse either, so an
+# upload's copy there is deleted by a job too: the upload app's delete mode,
+# which deletes only a dataset uploaded by the same Tapis user.
+
+def has_expanse_copy(row) -> bool:
+    """Whether an upload still has a copy on Expanse to delete: it got there,
+    and SDSC hasn't deleted it yet."""
+    return tapis_service.dataset_job_uuid(row["remote_path"]) is not None and not is_expired(row)
+
+
+def submit_delete(row, token: str) -> str:
+    """Submit the job that deletes an upload's copy on Expanse, as the user
+    whose token this is. Returns the job's id. The caller marks the dataset
+    'deleting' and then calls follow_delete."""
+    return tapis_service.submit_delete(
+        token, upload_job_uuid=tapis_service.dataset_job_uuid(row["remote_path"]),
+        name=f"fnas-lcd-delete-dataset-{row['id']}")
+
+
+def follow_delete(ds_id: int, uuid: str, uploader: str) -> None:
+    """Remove the dataset once its delete job finishes, in the background."""
+    threading.Thread(target=_finish_delete, args=(ds_id, uuid, uploader),
+                     daemon=True, name=f"delete-dataset-{ds_id}").start()
+
+
+def _finish_delete(ds_id: int, uuid: str, uploader: str) -> None:
+    """Wait for a delete job to end, then remove the dataset -- or mark it
+    failed, with the reason, so its uploader can try again."""
     try:
-        tapis_service.delete_upload_archive(remote_dir)
-    except Exception as e:  # noqa: BLE001 - the dataset is usable regardless
-        print(f"WARNING: could not remove the archive from the remote folder of upload {ds_id}: {e}",
-              flush=True)
-
+        _run_to_end(uuid, uploader, "delete")
+    except Exception as e:  # noqa: BLE001
+        _set_dataset(ds_id, copy_status="failed",
+                     copy_error=f"Deleting this dataset from Expanse failed, so it may still "
+                                f"be there. Try deleting it again. ({e})")
+        return
     with get_db() as conn:
-        conn.execute(
-            "UPDATE datasets SET remote_path=%s, path=%s, copy_status='ready', copy_error=NULL, "
-            "is_ready=1 WHERE id=%s",
-            (remote_dir, remote_dir, ds_id),
-        )
+        row = conn.execute("SELECT name FROM datasets WHERE id=%s", (ds_id,)).fetchone()
+        conn.execute("DELETE FROM datasets WHERE id=%s", (ds_id,))
+    if row:
+        delete_local_files(ds_id, row["name"])
 
 
-def fail_interrupted_copies() -> int:
-    """At startup, mark failed any upload still marked 'copying': the thread
-    copying it died with the previous process (and on a pod, the disk
-    holding its files too). Returns how many there were."""
-    from ..database import get_db
+# ── restarts ───────────────────────────────────────────────────────────────
 
+def _resume(row) -> None:
+    uuid, uploader = row["remote_job_uuid"], row["uploaded_by"]
+    if row["copy_status"] == "deleting":
+        _finish_delete(row["id"], uuid, uploader)
+        return
+    if not uuid:
+        _fail_copy(row["id"], row["name"], _INTERRUPTED)
+        return
+    try:
+        # The archive's link died with the previous process. A job that
+        # hadn't fetched it yet never will.
+        state = tapis_service.watch(uuid, uploader, done=lambda s: True)
+        if state in tapis_service.INPUT_STATES:
+            try:
+                tapis_service.cancel(user_tokens.wait_for(uploader), uuid)
+            except Exception:  # noqa: BLE001 - it fails on its own without the file
+                pass
+            _fail_copy(row["id"], row["name"], _INTERRUPTED)
+            return
+        _finish_upload(row["id"], uuid, uploader)
+    except Exception as e:  # noqa: BLE001
+        _fail_copy(row["id"], row["name"], f"Copying to Expanse failed: {e}")
+
+
+def resume_interrupted_copies() -> int:
+    """At startup, pick up uploads that were being copied to Expanse or
+    deleted from it when the service stopped. Returns how many there were.
+
+    Their jobs outlive this process; their threads didn't. An upload whose
+    job had already copied the archive still completes; one that hadn't
+    fails, and its uploader is asked to upload again. Each waits for its
+    uploader's next visit if needed (user_tokens)."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, name FROM datasets WHERE copy_status='copying'"
+            "SELECT * FROM datasets WHERE copy_status IN ('copying', 'deleting')"
         ).fetchall()
     for row in rows:
-        threading.Thread(target=_fail_copy, args=(row["id"], row["name"], _INTERRUPTED),
-                         daemon=True).start()
+        threading.Thread(target=_resume, args=(dict(row),), daemon=True,
+                         name=f"resume-dataset-{row['id']}").start()
     return len(rows)
+
+
+# ── lifetime on Expanse ────────────────────────────────────────────────────
+
+def expires_on(row) -> datetime.date | None:
+    """The day SDSC deletes an upload's copy on Expanse (see
+    settings.dataset_lifetime_days), or None for datasets this service
+    didn't copy there itself."""
+    if not row["is_upload"] or tapis_service.dataset_job_uuid(row["remote_path"]) is None:
+        return None
+    created = datetime.date.fromisoformat(row["created_at"][:10])
+    return created + datetime.timedelta(days=settings.dataset_lifetime_days)
+
+
+def is_expired(row) -> bool:
+    expires = expires_on(row)
+    return expires is not None and expires <= datetime.date.today()
+
+
+def usable_datasets(conn) -> list:
+    """The datasets offered for search and training: ready, and not expired."""
+    rows = conn.execute("SELECT * FROM datasets WHERE is_ready=1 ORDER BY id").fetchall()
+    return [row for row in rows if not is_expired(row)]
+
+
+def training_problem(row) -> str | None:
+    """Why a dataset can't be trained on Expanse right now, or None."""
+    if not row["is_ready"]:
+        return f"Dataset '{row['name']}' is not ready for training."
+    if tapis_service.dataset_job_uuid(row["remote_path"]) is None:
+        # e.g. an upload copied to Pitzer by an earlier version of the service.
+        return (f"Dataset '{row['name']}' isn't on Expanse, so it can't be trained there. "
+                f"Please upload it again.")
+    if is_expired(row):
+        return (f"Dataset '{row['name']}' is no longer on Expanse: SDSC deletes uploads "
+                f"{settings.dataset_lifetime_days} days after they were copied there. "
+                f"Please upload it again.")
+    return None

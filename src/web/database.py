@@ -58,37 +58,6 @@ CREATE TABLE IF NOT EXISTS datasets (
     created_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
 );
 
--- Small key/value store for credentials the service must persist across
--- restarts. Tapis rotates refresh tokens on every use, so the current one
--- cannot live in an environment variable: after the first refresh the env value
--- is dead, and a restart would authenticate with a stale token.
-CREATE TABLE IF NOT EXISTS service_credentials (
-    key             TEXT PRIMARY KEY,
-    value           TEXT NOT NULL,
-    updated_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
-);
-
--- Browser sessions. An opaque random id in an HttpOnly cookie maps to a row
--- here; nothing about the session is derivable from the cookie value itself
--- (no signing), so a stolen cookie is only as powerful as a stolen DB row,
--- and revoking a session is a DELETE.
-CREATE TABLE IF NOT EXISTS sessions (
-    id              TEXT PRIMARY KEY,
-    tapis_username  TEXT,
-    created_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS'),
-    last_seen_at    TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
-);
-
--- Per-user Tapis OAuth credentials, one row per Tapis account that has
--- connected via the authorization_code flow. Keyed by tapis_username (the
--- identity Tapis itself reports via /v3/oauth2/userinfo), separate from
--- service_credentials (the single shared/fallback service account).
-CREATE TABLE IF NOT EXISTS user_tapis_credentials (
-    tapis_username  TEXT PRIMARY KEY,
-    refresh_token   TEXT NOT NULL,
-    updated_at      TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
-);
-
 CREATE TABLE IF NOT EXISTS device_configs (
     id              SERIAL PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
@@ -140,9 +109,8 @@ _JOBS_MIGRATION_COLUMNS = {
     # UUID of the Tapis job doing the training. Persisted so a service restart
     # can re-attach to jobs still running on the HPC system.
     "tapis_job_uuid": "TEXT",
-    # Tapis username of the submitter, when known (session-authenticated
-    # requests). NULL for jobs submitted before this existed, or through the
-    # shared-service-account fallback path (no session).
+    # Tapis username of the submitter, whose login the training job runs
+    # with. NULL for jobs submitted before this existed.
     "submitted_by": "TEXT",
 }
 
@@ -153,12 +121,15 @@ _DATASETS_MIGRATION_COLUMNS = {
     # Tapis username of whoever uploaded the dataset; only they may delete it.
     # NULL for pre-configured datasets and for uploads made before this existed.
     "uploaded_by": "TEXT",
-    # Progress of copying an upload to the execution system so it can be
-    # trained: 'copying', 'ready' or 'failed' (reason in copy_error). NULL for
-    # pre-configured datasets, uploads made before this existed, and uploads
-    # when Tapis is disabled.
+    # Progress of copying an upload to Expanse so it can be trained:
+    # 'copying', 'ready', 'deleting' or 'failed' (reason in copy_error). NULL
+    # for pre-configured datasets, uploads made before this existed, and
+    # uploads when Tapis is disabled.
     "copy_status": "TEXT",
     "copy_error": "TEXT",
+    # The Tapis job copying the upload to Expanse, or deleting it from there
+    # ('deleting'), so a restart can pick it up again.
+    "remote_job_uuid": "TEXT",
 }
 
 
@@ -208,11 +179,15 @@ def init_db() -> None:
                 (ds["name"], ds["path"], ds.get("remote_path"), ds["num_classes"],
                  ds["is_upload"], ds["is_ready"], ds["description"]),
             )
-            # ON CONFLICT DO NOTHING above means a dataset seeded before
-            # remote_path existed keeps a NULL. Backfill it so upgrading an
-            # existing deployment doesn't silently block remote training.
-            if ds.get("remote_path"):
-                conn.execute(
-                    "UPDATE datasets SET remote_path=%s WHERE name=%s AND remote_path IS NULL",
-                    (ds["remote_path"], ds["name"]),
-                )
+            # The configuration is the source of truth for where a built-in
+            # dataset is on Expanse, which can change between deployments
+            # (ON CONFLICT DO NOTHING above keeps an existing row as it was).
+            # With remote training on, one that isn't on Expanse isn't offered.
+            ready = ds["is_ready"]
+            if settings.tapis_enabled:
+                from .services.tapis_service import dataset_job_uuid
+                ready = 1 if dataset_job_uuid(ds.get("remote_path")) else 0
+            conn.execute(
+                "UPDATE datasets SET remote_path=%s, is_ready=%s WHERE name=%s AND is_upload=0",
+                (ds.get("remote_path"), ready, ds["name"]),
+            )

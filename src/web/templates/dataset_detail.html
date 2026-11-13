@@ -8,9 +8,16 @@
 {% if dataset.status == "failed" %}
 <div class="alert alert-error">{{ dataset.status_detail }}</div>
 {% elif dataset.status in ("uploading", "copying") %}
-<p class="muted">This dataset is being copied to the training system, which can take a
-few minutes for a large one. It can be used for search and training once its status is
-Ready; this page updates by itself.</p>
+<p class="muted">This dataset is being copied to SDSC Expanse, which can take a few
+minutes, or longer when Expanse is busy. It can be used for search and training once its
+status is Ready; this page updates by itself.</p>
+{% elif dataset.status == "deleting" %}
+<p class="muted">This dataset is being deleted from SDSC Expanse. It disappears from the
+list once that is done.</p>
+{% elif dataset.status == "expired" %}
+<div class="alert alert-info">SDSC deleted this dataset's copy on Expanse
+{{ dataset_lifetime_days }} days after it was uploaded, so it can no longer be used.
+Upload it again to keep using it.</div>
 {% endif %}
 
 <div class="card">
@@ -24,6 +31,9 @@ Ready; this page updates by itself.</p>
         <tr><th>Type</th><td>{% if dataset.is_upload %}Uploaded{% if dataset.uploaded_by %} by {{ dataset.uploaded_by }}{% endif %}{% else %}Built-in{% endif %}</td></tr>
         <tr><th>Description</th><td>{{ dataset.description }}</td></tr>
         <tr><th>Created</th><td>{{ dataset.created_at[:19] if dataset.created_at else "" }}</td></tr>
+        {% if dataset.expires_on %}
+        <tr><th>Deleted by SDSC on</th><td>{{ dataset.expires_on }}</td></tr>
+        {% endif %}
     </table>
 </div>
 
@@ -63,14 +73,18 @@ Ready; this page updates by itself.</p>
 </div>
 {% endif %}
 
-{% if dataset.status in ("uploading", "copying") %}
+{% if dataset.status in ("uploading", "copying", "deleting") %}
 <script>
 // Reload once the status changes (to ready or failed).
 (function poll() {
     setTimeout(() => {
         fetch('/api/datasets/{{ dataset.id }}')
-            .then(r => r.json())
-            .then(d => { if (d.status !== '{{ dataset.status }}') location.reload(); else poll(); })
+            .then(r => r.ok ? r.json() : {status: 'gone'})
+            .then(d => {
+                if (d.status === 'gone') location.href = '/datasets';
+                else if (d.status !== '{{ dataset.status }}') location.reload();
+                else poll();
+            })
             .catch(poll);
     }, 5000);
 })();

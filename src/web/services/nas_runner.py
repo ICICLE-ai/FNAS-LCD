@@ -126,18 +126,15 @@ def _load_job(job_id: int) -> dict | None:
         conn.close()
 
 
-def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
+def _fetch_trained_model(token: str, uuid: str, structure_str: str, num_classes: int,
                          save_dir: Path, output_path: Path) -> float | None:
-    """Retrieve the trained model from a finished Tapis job.
+    """Retrieve the trained model from a finished Tapis job, with the token
+    of the user who submitted it.
 
     Prefers a TorchScript model exported by the training job itself, which
     needs nothing from us. Container builds without that support return only a
     checkpoint, so fall back to rebuilding the architecture and loading the
     weights here.
-
-    Always downloads as the shared service account -- every job is submitted
-    under it too (see `_run_remote_training`), so it's also the only
-    identity that can see the job's outputs.
 
     Returns the best validation accuracy if the job reported it.
     """
@@ -145,11 +142,11 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
 
     from . import tapis_service
 
-    available = tapis_service.list_outputs(uuid)
+    available = tapis_service.list_outputs(token, uuid)
 
     # Preferred: the job exported a ready-to-serve model.
     if tapis_service.MODEL_FILE in available:
-        data = tapis_service.download_output(uuid, tapis_service.MODEL_FILE)
+        data = tapis_service.download_output(token, uuid, tapis_service.MODEL_FILE)
         if data:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(data)
@@ -157,7 +154,7 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
             raise RuntimeError(f"could not download {tapis_service.MODEL_FILE}")
     else:
         # Fallback: raw checkpoint -> rebuild + trace locally.
-        data = tapis_service.download_output(uuid, tapis_service.CHECKPOINT_FILE)
+        data = tapis_service.download_output(token, uuid, tapis_service.CHECKPOINT_FILE)
         if not data:
             raise RuntimeError(
                 f"training job {uuid} produced neither {tapis_service.MODEL_FILE} "
@@ -173,7 +170,7 @@ def _fetch_trained_model(uuid: str, structure_str: str, num_classes: int,
         )
 
     # Metrics are optional: older training containers do not emit them.
-    metrics = tapis_service.download_output(uuid, tapis_service.METRICS_FILE)
+    metrics = tapis_service.download_output(token, uuid, tapis_service.METRICS_FILE)
     if not metrics:
         return None
     try:
@@ -195,19 +192,15 @@ def _fail(job_id: int, message: str) -> None:
 
 
 def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) -> str | None:
-    """Submit a Tapis training job and wait for it. Returns the job UUID, or
-    None if it failed (in which case the job row is already marked failed).
+    """Submit a training job to Expanse and wait for it. Returns the job UUID,
+    or None if it failed (in which case the job row is already marked failed)
+    or was cancelled.
 
-    Every job runs under the shared service account on Pitzer, under the
-    service's own work directory (`settings.tapis_work_base`) -- regardless
-    of who submitted it through the UI. `submitted_by` is still recorded in
-    the job's name and Tapis-side description for attribution; it just no
-    longer selects which Tapis credential executes the job. (Previously a
-    connected user's own credential was used instead; that required each
-    user to have their own Pitzer account and writable work directory,
-    which isn't set up yet for anyone but the service account.)
+    Runs with the submitter's own Tapis login (see user_tokens). If their
+    token expires and they haven't opened FNAS-LCD since, this waits for
+    their next visit, so the job's model is collected once they are back.
     """
-    from . import tapis_service
+    from . import dataset_service, tapis_service, user_tokens
 
     conn = get_connection()
     try:
@@ -221,28 +214,28 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
         _fail(job_id, f"Dataset not found: {job['dataset_id']}")
         return None
 
-    remote_path = ds_row["remote_path"]
-    if not remote_path:
-        # An upload gets a remote_path only once it has been copied to the
-        # training system (dataset_service.stage_upload). Submitting anyway
-        # would fail later during input staging with a far less obvious error.
-        _fail(job_id,
-              f"Dataset '{ds_row['name']}' is not ready for training: it hasn't "
-              f"been copied to the training system. An uploaded dataset can be "
-              f"trained once its status is Ready.")
-        return None
-
     submitted_by = job.get("submitted_by")
+    if not submitted_by:
+        _fail(job_id, "This job has no Tapis login to run with.")
+        return None
 
     uuid = job.get("tapis_job_uuid")
     if not uuid:
+        problem = dataset_service.training_problem(ds_row)
+        if problem:
+            _fail(job_id, problem)
+            return None
+        token = user_tokens.wait_for(submitted_by, cancel_event)
+        if token is None:
+            return None  # cancelled meanwhile
         try:
             uuid = tapis_service.submit_training(
+                token,
                 submitted_by=submitted_by,
                 name=f"fnas-lcd-{_safe_filename_part(submitted_by)}-job-{job_id}",
                 structure_str=job["structure_str"],
                 num_classes=ds_row["num_classes"],
-                remote_dataset_path=remote_path,
+                remote_dataset_path=ds_row["remote_path"],
                 epochs=job["epochs"],
                 max_iters=job["max_iters"],
                 batch_size=job["batch_size"],
@@ -255,32 +248,23 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
             return None
         _update_status(job_id, tapis_job_uuid=uuid)
 
-    # Poll until the remote job stops progressing. Queue waits can be long, so
-    # this deliberately has no timeout of its own -- the job's own walltime
-    # bounds it.
-    while True:
-        if cancel_event.is_set():
+    try:
+        state = tapis_service.watch(uuid, submitted_by, stop=cancel_event)
+    except Exception as e:  # noqa: BLE001
+        _fail(job_id, f"Lost contact with the training job {uuid}: {e}")
+        return None
+
+    if state is None:  # cancelled (job_manager.cancel): stop the job on Expanse too
+        token = user_tokens.current(submitted_by)
+        if token:
             try:
-                tapis_service.cancel(uuid)
+                tapis_service.cancel(token, uuid)
             except Exception:  # noqa: BLE001
                 pass
-            return None
-
-        try:
-            state = tapis_service.get_status(uuid)
-        except Exception as e:  # noqa: BLE001
-            _fail(job_id, f"Lost contact with the training job {uuid}: {e}")
-            return None
-
-        if state in tapis_service.TERMINAL_STATES:
-            break
-        time.sleep(settings.tapis_poll_seconds)
+        return None
 
     if state != "FINISHED":
-        detail = tapis_service.get_last_message(uuid) or state
-        log = tapis_service.download_output(uuid, tapis_service.LOG_FILE)
-        if log:
-            detail += "\n" + log.decode(errors="replace")[-2000:]
+        detail = tapis_service.failure_detail(uuid, submitted_by, state)
         _fail(job_id, f"Training job {state}: {detail}")
         return None
 
@@ -405,8 +389,10 @@ def execute_job(job_id: int, cancel_event: threading.Event):
     best_val_acc = None
     try:
         if tapis_uuid is not None:
+            from . import user_tokens
             best_val_acc = _fetch_trained_model(
-                tapis_uuid, structure_str, num_classes, save_dir, local_output_path,
+                user_tokens.wait_for(job.get("submitted_by")), tapis_uuid, structure_str, num_classes,
+                save_dir, local_output_path,
             )
         else:
             _export_fresh_model(

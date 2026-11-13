@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -21,9 +21,13 @@ class DatasetResponse(BaseModel):
     created_at: str = ""
     uploaded_by: Optional[str] = None
     # "ready", or for an upload still in progress "uploading" / "copying"
-    # (to the training system), or "failed" with the reason in status_detail.
+    # (to Expanse), "deleting" while its copy there is being deleted,
+    # "expired" once SDSC has deleted that copy (see expires_on), or "failed"
+    # with the reason in status_detail.
     status: str = "ready"
     status_detail: Optional[str] = None
+    # The day SDSC deletes the upload's copy on Expanse.
+    expires_on: Optional[date] = None
 
     class Config:
         from_attributes = True

@@ -42,11 +42,9 @@ class JobManager:
     ) -> JobResponse:
         """Create a job row and launch it in a background thread.
 
-        `submitted_by` is the Tapis username of the connected user, when the
-        caller has one (see `deps.get_session`) — persisted on the row and
-        used for attribution (job name, Tapis description) so responsibility
-        for the job is known. The job itself still runs under the shared
-        service account on Pitzer, under its own work directory -- see
+        `submitted_by` is the Tapis username of the logged-in user (see
+        `deps.get_session`), persisted on the row. The training job runs on
+        Expanse with that user's own login -- see
         `nas_runner._run_remote_training`.
         """
         import datetime as dt
@@ -106,7 +104,7 @@ class JobManager:
         # Check current status
         with get_db() as conn:
             row = conn.execute(
-                "SELECT status, tapis_job_uuid FROM jobs WHERE id=%s",
+                "SELECT status FROM jobs WHERE id=%s",
                 (job_id,),
             ).fetchone()
         if row is None:
@@ -119,20 +117,9 @@ class JobManager:
         if row["status"] not in cancellable:
             return False
 
+        # The job's thread notices at once and stops its job on Expanse too
+        # (nas_runner._run_remote_training).
         evt.set()
-
-        # Stop the remote job as well. The polling loop also cancels when it
-        # notices the event, but doing it here means the allocation is released
-        # immediately rather than up to one poll interval later.
-        if row["tapis_job_uuid"]:
-            try:
-                from .tapis_service import cancel as tapis_cancel
-                tapis_cancel(row["tapis_job_uuid"])
-            except Exception as e:  # noqa: BLE001
-                # The local job is still cancelled; surface the remote failure
-                # rather than pretending everything stopped cleanly.
-                print(f"WARNING: could not cancel remote job "
-                      f"{row['tapis_job_uuid']}: {e}")
         with get_db() as conn:
             conn.execute(
                 "UPDATE jobs SET status='cancelled', finished_at=%s WHERE id=%s",
@@ -147,8 +134,9 @@ class JobManager:
 
         A restart kills the polling threads but not the remote training jobs
         they were watching. Their UUIDs are in Postgres, so pick them back up
-        rather than leaving them to run to completion unobserved. Returns the
-        number of jobs resumed.
+        rather than leaving them to run to completion unobserved. A restart
+        also forgets every user's token, so each waits for its owner's next
+        visit (see user_tokens). Returns the number of jobs resumed.
         """
         with get_db() as conn:
             rows = conn.execute(

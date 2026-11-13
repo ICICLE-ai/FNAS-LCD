@@ -10,6 +10,17 @@
 
 <div class="card">
     <p>Upload a dataset in <strong>ImageFolder</strong> format as a zip or tar archive.</p>
+    {% if tapis_enabled %}
+    <div class="alert alert-info">
+        The dataset is copied to SDSC Expanse for training:
+        <ul>
+            <li>It is kept there under an account shared by ICICLE's services, so other
+                ICICLE users can access it. Don't upload data that must stay private.</li>
+            <li>SDSC deletes it {{ dataset_lifetime_days }} days after it is uploaded. To keep
+                using it after that, upload it again.</li>
+        </ul>
+    </div>
+    {% endif %}
     <p>Expected structure inside the archive:</p>
     <pre>train/
   class_0/

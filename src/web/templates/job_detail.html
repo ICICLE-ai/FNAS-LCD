@@ -73,6 +73,12 @@
     </table>
 </div>
 
+{% if tapis_enabled and job.status in ('pending', 'searching', 'training', 'exporting') %}
+<p class="muted">You can close this page: the job keeps running on SDSC Expanse. If it
+finishes after your ICICLE login has expired, FNAS-LCD collects the model the next time
+you open it.</p>
+{% endif %}
+
 <div class="actions" style="margin-top:20px;">
     {% if job.status == 'completed' %}
     <a href="/api/download/{{ job.id }}" class="btn btn-primary">Download Model (.pt)</a>

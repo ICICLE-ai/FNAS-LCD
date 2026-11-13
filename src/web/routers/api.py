@@ -9,7 +9,7 @@ from fastapi.responses import Response
 
 from ..config import settings
 from ..database import get_db
-from ..deps import apply_session_cookie, get_session
+from ..deps import get_session
 from ..services import storage_service
 from ..models import (
     DatasetListResponse,
@@ -23,7 +23,7 @@ from ..models import (
     SearchRequest,
     SearchResponse,
 )
-from ..services import dataset_service
+from ..services import dataset_service, user_tokens
 
 router = APIRouter(prefix="/api")
 
@@ -32,8 +32,10 @@ router = APIRouter(prefix="/api")
 
 def _dataset_status(row) -> str:
     """See DatasetResponse.status."""
-    if row.get("copy_status") in ("copying", "failed"):
+    if row.get("copy_status") in ("copying", "deleting", "failed"):
         return row["copy_status"]
+    if dataset_service.is_expired(row):
+        return "expired"
     return "ready" if row["is_ready"] else "uploading"
 
 
@@ -50,6 +52,7 @@ def _row_to_dataset(row) -> DatasetResponse:
         uploaded_by=row.get("uploaded_by"),
         status=_dataset_status(row),
         status_detail=row.get("copy_error") if row.get("copy_status") == "failed" else None,
+        expires_on=dataset_service.expires_on(row),
     )
 
 
@@ -101,9 +104,7 @@ def list_devices():
 @router.get("/datasets", response_model=DatasetListResponse)
 def list_datasets():
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM datasets WHERE is_ready=1 ORDER BY id"
-        ).fetchall()
+        rows = dataset_service.usable_datasets(conn)
     return DatasetListResponse(datasets=[_row_to_dataset(r) for r in rows])
 
 
@@ -133,7 +134,7 @@ def upload_dataset(
     uploaded_by = session.get("tapis_username")
     if not uploaded_by:
         raise HTTPException(
-            403, "Connect your Tapis account (GET /account) before uploading a dataset."
+            403, "Log in through the ICICLE portal before uploading a dataset."
         )
 
     if not file.filename:
@@ -164,7 +165,13 @@ def upload_dataset(
 def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
     """Delete an uploaded dataset. Only its uploader may, and only while no
     job has used it: jobs keep a reference to their dataset, so deleting it
-    would mean erasing those jobs' records."""
+    would mean erasing those jobs' records.
+
+    Its copy on Expanse is deleted by a job run with the uploader's own login,
+    which can take a few minutes; the dataset is shown as 'deleting' and
+    disappears once that job finishes."""
+    username = session.get("tapis_username")
+    delete_job = None
     with get_db() as conn:
         # Locked until the delete commits, so no job can start using it meanwhile.
         row = conn.execute(
@@ -174,12 +181,13 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
             raise HTTPException(404, "Dataset not found")
         if not row["is_upload"]:
             raise HTTPException(400, "Cannot delete pre-configured datasets")
-        if not session.get("tapis_username") or row["uploaded_by"] != session["tapis_username"]:
+        if not username or row["uploaded_by"] != username:
             raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
-        if row["copy_status"] == "copying":
+        busy = {"copying": "copied to Expanse", "deleting": "deleted from Expanse"}
+        if row["copy_status"] in busy:
             raise HTTPException(
-                409, "This dataset is still being copied to the training system. "
-                     "Try again once it is ready or has failed."
+                409, f"This dataset is still being {busy[row['copy_status']]}. "
+                     f"Try again once that has finished."
             )
         used = conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE dataset_id=%s", (dataset_id,)
@@ -190,20 +198,28 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
                      f"deleting it would erase their records."
             )
 
-        # Its copy on the execution system goes first: if that can't be
-        # removed, nothing is deleted and the user can simply retry.
-        if row["copy_status"] is not None:
-            from ..services import tapis_service
+        if dataset_service.has_expanse_copy(row):
+            token = user_tokens.current(username)
+            if not token:
+                raise HTTPException(401, "Your login is about to expire. Reload the page and try again.")
             try:
-                tapis_service.delete_upload_dir(
-                    dataset_service.remote_upload_dir(row["id"], row["name"]))
+                delete_job = dataset_service.submit_delete(row, token)
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(
-                    502, f"Couldn't delete the dataset's copy on the training system, "
+                    502, f"Couldn't start deleting the dataset's copy on Expanse, "
                          f"so nothing was deleted: {e}"
                 )
-        dataset_service.delete_local_files(row["id"], row["name"])
-        conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
+            conn.execute(
+                "UPDATE datasets SET copy_status='deleting', copy_error=NULL, is_ready=0, "
+                "remote_job_uuid=%s WHERE id=%s", (delete_job, dataset_id),
+            )
+        else:
+            dataset_service.delete_local_files(row["id"], row["name"])
+            conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
+    if delete_job:
+        dataset_service.follow_delete(dataset_id, delete_job, username)
+        return MessageResponse(message=f"Deleting dataset {dataset_id} from Expanse. "
+                                       f"It disappears from the list once that's done.")
     return MessageResponse(message=f"Dataset {dataset_id} deleted")
 
 
@@ -250,21 +266,17 @@ def run_search(req: SearchRequest):
 def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
     """Create and start a training job.
 
-    Requires a Tapis identity -- either a pass-through token the caller
-    already holds (e.g. injected by a hosting platform; takes priority when
-    present), or a connected account via /account -- so the submitter is
-    known and recorded for attribution. The job itself always runs under
-    the shared service account on Pitzer (see
-    `nas_runner._run_remote_training`), not the submitter's own credential.
+    Requires the caller's Tapis login (the token the ICICLE pod passes in):
+    the training job runs on Expanse with it, and the submitter is recorded.
     """
     from ..services.job_manager import job_manager
 
-    # `session` already reflects a validated pass-through token, if one was
-    # sent (see deps.get_session), so this covers both ways of identifying.
+    # The user of the validated Tapis token, if the request sent one
+    # (see deps.get_session).
     submitted_by = session.get("tapis_username")
     if not submitted_by:
         raise HTTPException(
-            403, "Connect your Tapis account (GET /account) before submitting a job."
+            403, "Log in through the ICICLE portal before submitting a job."
         )
 
     with get_db() as conn:
@@ -368,7 +380,7 @@ def cancel_job(job_id: int, session: dict = Depends(get_session)):
 # ── download ───────────────────────────────────────────────────────────────
 
 @router.get("/download/{job_id}")
-def download_model(job_id: int, response: Response, session: dict = Depends(get_session)):
+def download_model(job_id: int, session: dict = Depends(get_session)):
     with get_db() as conn:
         row = _owned_job_row(conn, job_id, session)
     if row["status"] != "completed":
@@ -380,9 +392,8 @@ def download_model(job_id: int, response: Response, session: dict = Depends(get_
 
     filename = Path(object_key).name
     data = storage_service.download_object(object_key)
-    download = Response(
+    return Response(
         content=data,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-    return apply_session_cookie(response, download)

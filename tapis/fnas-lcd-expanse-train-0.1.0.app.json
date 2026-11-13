@@ -1,0 +1,81 @@
+{
+  "id": "fnas-lcd-expanse-train",
+  "version": "0.1.0",
+  "description": "FNAS-LCD: train one searched architecture on an uploaded dataset, on SDSC Expanse. Submitted by the FNAS-LCD service with each user's own login.",
+  "runtime": "SINGULARITY",
+  "runtimeOptions": [
+    "SINGULARITY_RUN"
+  ],
+  "containerImage": "docker://ghcr.io/icicle-ai/fnas-lcd:0.1.0",
+  "jobType": "BATCH",
+  "strictFileInputs": true,
+  "jobAttributes": {
+    "description": "FNAS-LCD single-GPU training job",
+    "execSystemId": "expanse-tapis-static",
+    "execSystemExecDir": "/jobs/fnas-lcd/training/${JobUUID}",
+    "execSystemInputDir": "/jobs/fnas-lcd/training/${JobUUID}",
+    "execSystemOutputDir": "/jobs/fnas-lcd/training/${JobUUID}/output",
+    "execSystemLogicalQueue": "tapisGPUshared",
+    "archiveOnAppError": true,
+    "nodeCount": 1,
+    "coresPerNode": 12,
+    "memoryMB": 64000,
+    "maxMinutes": 800,
+    "parameterSet": {
+      "appArgs": [
+        {
+          "name": "mode",
+          "arg": "train",
+          "inputMode": "FIXED",
+          "description": "src/training/expanse_job.py's train mode. The service adds the dataset, the architecture and the training settings; anything else is refused."
+        }
+      ],
+      "containerArgs": [
+        {
+          "name": "start-folder",
+          "arg": "--pwd /app",
+          "inputMode": "FIXED",
+          "description": "Start in /app, so the image's entrypoint.sh runs."
+        },
+        {
+          "name": "job-folder",
+          "arg": "--bind $PWD:/workspace",
+          "inputMode": "FIXED",
+          "description": "The job's own folder, as /workspace."
+        },
+        {
+          "name": "gpu",
+          "arg": "--nv",
+          "inputMode": "FIXED",
+          "description": "Make the node's GPU usable in the container."
+        },
+        {
+          "name": "datasets",
+          "arg": "--bind /expanse/lustre/scratch/harvest/temp_project/jobs/fnas-lcd/uploads:/datasets:ro",
+          "inputMode": "FIXED",
+          "description": "Every uploaded dataset, read-only, as /datasets/<upload job id>/dataset."
+        }
+      ],
+      "schedulerOptions": [
+        {
+          "name": "allocation",
+          "arg": "-A uot260",
+          "inputMode": "FIXED",
+          "description": "The Expanse allocation ICICLE's services charge their jobs to."
+        },
+        {
+          "name": "gpu",
+          "arg": "--gpus=1",
+          "inputMode": "FIXED",
+          "description": "One GPU."
+        },
+        {
+          "name": "singularity-cache",
+          "inputMode": "FIXED",
+          "arg": "--export=ALL,SINGULARITY_CACHEDIR=/expanse/lustre/scratch/harvest/temp_project/.cache/singularity/cache,APPTAINER_CACHEDIR=/expanse/lustre/scratch/harvest/temp_project/.cache/singularity/cache",
+          "description": "Keep converted images in the shared cache in harvest's scratch space."
+        }
+      ]
+    }
+  }
+}

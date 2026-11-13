@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     if settings.tapis_enabled:
         print(f"  Training: {settings.tapis_base_url} "
               f"app={settings.tapis_app_id}:{settings.tapis_app_version} "
-              f"system={settings.tapis_system} queue={settings.tapis_queue}")
+              f"upload app={settings.tapis_upload_app_id}:{settings.tapis_upload_app_version}")
         # Remote jobs outlive this process. Re-attach to any that were still
         # running when we last stopped, otherwise they finish unobserved and
         # their models are never collected.
@@ -46,13 +46,12 @@ async def lifespan(app: FastAPI):
         resumed = job_manager.resume_interrupted()
         if resumed:
             print(f"  Resumed:  {resumed} in-flight training job(s)")
-        # Copies of uploads to the execution system aren't resumed: their
-        # files were on this container's disk. Their uploaders are told to
-        # upload again.
-        from web.services.dataset_service import fail_interrupted_copies
-        interrupted = fail_interrupted_copies()
+        # Uploads being copied to Expanse or deleted from it: their jobs
+        # outlive this process too.
+        from web.services.dataset_service import resume_interrupted_copies
+        interrupted = resume_interrupted_copies()
         if interrupted:
-            print(f"  Failed:   {interrupted} dataset copy(ies) interrupted by the restart")
+            print(f"  Resumed:  {interrupted} dataset copy/delete(s) interrupted by the restart")
     else:
         print("  Training: local (TAPIS_ENABLED=0 — models are not trained)")
     print(f"  Server:   http://{settings.host}:{settings.port}")
@@ -138,12 +137,30 @@ app.add_middleware(_UploadSizeLimit)
 _STATIC = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
+# ── upload links ───────────────────────────────────────────────────────────
+# Outside the login gate: Tapis downloads uploads from here without a login
+# (see services/upload_links.py).
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
+
+from web.services import upload_links
+
+
+@app.api_route(upload_links.PATH_PREFIX + "{secret}", methods=["GET", "HEAD"],
+               include_in_schema=False)
+def upload_link(secret: str):
+    path = upload_links.lookup(secret)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(path, media_type="application/x-tar", filename="dataset.tar")
+
+
 # ── routers ────────────────────────────────────────────────────────────────
 from fastapi import Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from web.deps import AuthRequired, require_login
-from web.routers import api, auth, ui
+from web.routers import api, ui
 
 
 @app.exception_handler(AuthRequired)
@@ -159,12 +176,11 @@ async def _auth_required(request: Request, exc: AuthRequired):
     )
 
 
-# /health and /static are registered on `app` directly, above, so they stay
-# open. The OAuth routes are the non-token way in and are left ungated.
+# /health, /static and the upload links are registered on `app` directly,
+# above, so they stay open.
 _gate = [Depends(require_login)]
 app.include_router(ui.router, dependencies=_gate)    # HTML pages (no prefix)
 app.include_router(api.router, dependencies=_gate)   # JSON API (/api prefix)
-app.include_router(auth.router)  # Tapis OAuth account-connection routes
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..config import settings
 from ..database import get_db
-from ..deps import apply_session_cookie, get_session
+from ..deps import get_session
 from .api import _row_to_dataset, _row_to_job
 from ..services import dataset_service
 
@@ -20,22 +20,21 @@ _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 templates.env.globals["max_upload_bytes"] = settings.max_upload_bytes
 templates.env.globals["max_upload_label"] = dataset_service.format_size(settings.max_upload_bytes)
+# For the notices about training on Expanse (search, upload and job pages).
+templates.env.globals["tapis_enabled"] = settings.tapis_enabled
+templates.env.globals["max_job_minutes"] = settings.tapis_max_minutes
+templates.env.globals["jobs_per_user"] = settings.expanse_jobs_per_user
+templates.env.globals["dataset_lifetime_days"] = settings.dataset_lifetime_days
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
-
-def _get_datasets(conn) -> list:
-    return conn.execute(
-        "SELECT * FROM datasets WHERE is_ready=1 ORDER BY id"
-    ).fetchall()
-
 
 def _get_device_configs(conn) -> list:
     return conn.execute("SELECT * FROM device_configs ORDER BY id").fetchall()
 
 
 def _get_jobs(conn, tapis_username, status=None, limit=50):
-    # tapis_username=None (no connected account) matches nothing -- SQL's
+    # tapis_username=None (not logged in) matches nothing -- SQL's
     # `= NULL` is never true, so this naturally returns zero rows rather
     # than needing a special case.
     if status:
@@ -73,11 +72,11 @@ def _job_stats(conn, tapis_username) -> dict:
 # ── pages ──────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def index(request: Request, response: Response, submitted: int | None = Query(None),
+def index(request: Request, submitted: int | None = Query(None),
           session: dict = Depends(get_session)):
     tapis_username = session.get("tapis_username")
     with get_db() as conn:
-        ds_count = conn.execute("SELECT COUNT(*) AS count FROM datasets WHERE is_ready=1").fetchone()["count"]
+        ds_count = len(dataset_service.usable_datasets(conn))
         stats = _job_stats(conn, tapis_username)
         recent = conn.execute(
             "SELECT jobs.*, datasets.name AS dataset_name FROM jobs "
@@ -87,14 +86,13 @@ def index(request: Request, response: Response, submitted: int | None = Query(No
         ).fetchall()
     recent_jobs = [_row_to_job(r) for r in recent]
     active = {"pending", "searching", "training", "exporting"}
-    page = templates.TemplateResponse(request, "index.html", {
+    return templates.TemplateResponse(request, "index.html", {
         "dataset_count": ds_count,
         "stats": stats,
         "recent_jobs": recent_jobs,
         "has_active": any(j.status in active for j in recent_jobs),
         "submitted": submitted,
     })
-    return apply_session_cookie(response, page)
 
 
 # ── datasets ───────────────────────────────────────────────────────────────
@@ -122,18 +120,16 @@ def dataset_upload_form(request: Request):
 @router.post("/datasets/upload", response_class=HTMLResponse)
 def dataset_upload_handler(
     request: Request,
-    response: Response,
     name: str = Form(...),
     file: UploadFile = File(...),
     session: dict = Depends(get_session),
 ):
     def form_error(message: str):
-        page = templates.TemplateResponse(request, "dataset_upload.html", {"error": message})
-        return apply_session_cookie(response, page)
+        return templates.TemplateResponse(request, "dataset_upload.html", {"error": message})
 
     # Uploads are attributed, like jobs: only the uploader may delete one.
     if not session.get("tapis_username"):
-        return form_error("Connect your Tapis account before uploading a dataset.")
+        return form_error("Log in through the ICICLE portal before uploading a dataset.")
 
     if not file.filename:
         return form_error("Filename is required")
@@ -152,8 +148,7 @@ def dataset_upload_handler(
     except Exception as e:
         return form_error(str(e))
 
-    redirect = RedirectResponse(f"/datasets/{info['id']}", status_code=303)
-    return apply_session_cookie(response, redirect)
+    return RedirectResponse(f"/datasets/{info['id']}", status_code=303)
 
 
 @router.get("/datasets/{dataset_id}", response_class=HTMLResponse)
@@ -177,7 +172,7 @@ def dataset_detail(request: Request, dataset_id: int):
 @router.get("/search", response_class=HTMLResponse)
 def search_form(request: Request):
     with get_db() as conn:
-        datasets = _get_datasets(conn)
+        datasets = dataset_service.usable_datasets(conn)
         devices = _get_device_configs(conn)
     return templates.TemplateResponse(request, "search.html", {
         "datasets": [_row_to_dataset(r) for r in datasets],
@@ -188,19 +183,18 @@ def search_form(request: Request):
 @router.post("/search", response_class=HTMLResponse)
 def search_run(
     request: Request,
-    response: Response,
     dataset_id: int = Form(...),
     device_type: str = Form(...),
     budget: float = Form(...),
     session: dict = Depends(get_session),
 ):
-    """Submit a job: search + export run in the background (demo: training
-    is skipped). Redirects home with a 'submitted' flash; track progress
-    and download from the job's page."""
+    """Submit a job: search, training (when remote training is enabled)
+    and export run in the background. Redirects home with a 'submitted'
+    flash; track progress and download from the job's page."""
     from ..services.job_manager import job_manager
 
     with get_db() as conn:
-        datasets = _get_datasets(conn)
+        datasets = dataset_service.usable_datasets(conn)
         devices = _get_device_configs(conn)
         ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
         dev = conn.execute("SELECT * FROM device_configs WHERE name=%s", (device_type,)).fetchone()
@@ -211,12 +205,11 @@ def search_run(
         raise HTTPException(400, f"Unknown device: {device_type}")
 
     if not session.get("tapis_username"):
-        page = templates.TemplateResponse(request, "search.html", {
+        return templates.TemplateResponse(request, "search.html", {
             "datasets": [_row_to_dataset(r) for r in datasets],
             "devices": [dict(r) for r in devices],
-            "error": "Connect your Tapis account before submitting a job.",
+            "error": "Log in through the ICICLE portal before submitting a job.",
         })
-        return apply_session_cookie(response, page)
 
     try:
         job = job_manager.create_and_start(
@@ -226,21 +219,19 @@ def search_run(
             submitted_by=session["tapis_username"],
         )
     except ValueError as e:
-        page = templates.TemplateResponse(request, "search.html", {
+        return templates.TemplateResponse(request, "search.html", {
             "datasets": [_row_to_dataset(r) for r in datasets],
             "devices": [dict(r) for r in devices],
             "error": str(e),
         })
-        return apply_session_cookie(response, page)
 
-    redirect = RedirectResponse(f"/?submitted={job.id}", status_code=303)
-    return apply_session_cookie(response, redirect)
+    return RedirectResponse(f"/?submitted={job.id}", status_code=303)
 
 
 # ── jobs ───────────────────────────────────────────────────────────────────
 
 @router.get("/jobs", response_class=HTMLResponse)
-def jobs_page(request: Request, response: Response, status: str | None = Query(None),
+def jobs_page(request: Request, status: str | None = Query(None),
               session: dict = Depends(get_session)):
     tapis_username = session.get("tapis_username")
     with get_db() as conn:
@@ -248,26 +239,23 @@ def jobs_page(request: Request, response: Response, status: str | None = Query(N
         stats = _job_stats(conn, tapis_username)
     job_list = [_row_to_job(j) for j in jobs]
     active = {"pending", "searching", "training", "exporting"}
-    page = templates.TemplateResponse(request, "jobs.html", {
+    return templates.TemplateResponse(request, "jobs.html", {
         "jobs": job_list,
         "has_active": any(j.status in active for j in job_list),
         "stats": stats,
         "filter_status": status or "",
     })
-    return apply_session_cookie(response, page)
 
 
 @router.get("/account", response_class=HTMLResponse)
-def account_page(request: Request, response: Response, session: dict = Depends(get_session)):
-    page = templates.TemplateResponse(request, "account.html", {
+def account_page(request: Request, session: dict = Depends(get_session)):
+    return templates.TemplateResponse(request, "account.html", {
         "tapis_username": session.get("tapis_username"),
     })
-    return apply_session_cookie(response, page)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_detail(request: Request, job_id: int, response: Response,
-               session: dict = Depends(get_session)):
+def job_detail(request: Request, job_id: int, session: dict = Depends(get_session)):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
         # 404, not 403, for someone else's job -- don't reveal that a given
@@ -276,8 +264,7 @@ def job_detail(request: Request, job_id: int, response: Response,
                 or row["submitted_by"] != session["tapis_username"]:
             raise HTTPException(404, "Job not found")
         ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (row["dataset_id"],)).fetchone()
-    page = templates.TemplateResponse(request, "job_detail.html", {
+    return templates.TemplateResponse(request, "job_detail.html", {
         "job": _row_to_job(row),
         "dataset": _row_to_dataset(ds) if ds else None,
     })
-    return apply_session_cookie(response, page)

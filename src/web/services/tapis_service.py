@@ -1,200 +1,66 @@
-"""Tapis client — submits training jobs to a remote HPC system.
+"""Tapis calls: training jobs, dataset copies, and their results.
 
 Training does not run in this container. The service searches for an
-architecture, submits a Tapis job that trains it on GPU hardware, polls until
-the job finishes, then downloads the resulting model. This module owns every
-Tapis interaction; nas_runner drives it.
+architecture, submits a Tapis job that trains it on SDSC Expanse, polls until
+the job finishes, then downloads the resulting model. Uploaded datasets reach
+Expanse the same way, as jobs. This module owns every Tapis interaction;
+nas_runner and dataset_service drive it.
 
-Deliberately thin and module-level, matching storage_service.py: config comes
-from settings, no class hierarchy, and each function maps to one Tapis call.
+Every call is made with the user's own login: the access token passed in,
+which the ICICLE pod gives this service (see user_tokens). This module holds
+no credentials of its own.
+
+The jobs run through two apps in tapis/, owned by one ICICLE account and
+shared with all ICICLE users. Each app fixes where and how its jobs run --
+system, folders, allocation, queue, image -- so a request only names the app
+and gives the job's own arguments, and Tapis lends the app owner's folder
+permissions to whoever runs it.
 """
 
 from __future__ import annotations
 
-import io
-import posixpath
-import secrets
+import hashlib
+import re
 import threading
-from pathlib import Path
-from typing import Optional
-from urllib.parse import quote
+from typing import Callable, Optional
 
 from ..config import settings
+from . import user_tokens
 
 # Tapis job states that mean "no longer progressing".
 TERMINAL_STATES = {"FINISHED", "FAILED", "CANCELLED"}
+# States before Tapis has copied a job's input files into the job's folder.
+INPUT_STATES = {"PENDING", "PROCESSING_INPUTS", "STAGING_INPUTS"}
 
-# Files a finished job leaves in its output directory.
+# Files a finished training job leaves in its output folder.
 MODEL_FILE = "model.pt"                      # TorchScript, when the job exports it
 CHECKPOINT_FILE = "best-params_rank0.pth"    # always present
 METRICS_FILE = "best_metrics.json"
 LOG_FILE = "tapisjob.out"
 
-# Keyed by tapis_username; the shared/service-account session lives under
-# key None. Each identity's Tapis session is independent and cached/rotated
-# separately.
-_clients: dict = {}
-_client_lock = threading.Lock()
+# Where the upload app keeps each upload: a folder per upload job, named after
+# the job, holding the unpacked dataset (tapis/fnas-lcd-expanse-upload-*.json).
+# On expanse-tapis-static, Tapis paths start at harvest's scratch space.
+EXPANSE_ROOT = "/expanse/lustre/scratch/harvest/temp_project"
+UPLOADS_DIR = f"{EXPANSE_ROOT}/jobs/fnas-lcd/uploads"
+_JOB_UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-[0-9]{3}"
+_DATASET_PATH = re.compile(rf"^{re.escape(UPLOADS_DIR)}/({_JOB_UUID})/dataset$")
 
 
 class TapisNotConfigured(RuntimeError):
-    """Raised when remote training is requested but credentials are missing."""
+    """Raised when remote training is requested but cannot be done."""
 
 
-# ── refresh-token credentials (preferred) ──────────────────────────────────
-#
-# Tapis v3 has no client_credentials/service-account grant: tokens always
-# represent a user. The next best thing is an OAuth client plus a refresh token,
-# so the service holds a revocable credential instead of someone's password.
-#
-# A bare password grant returns only an access token (4h, no refresh token).
-# Passing client_id/client_key with the grant is what makes Tapis issue a
-# refresh token as well.
-
-_REFRESH_TOKEN_KEY = "tapis_refresh_token"
+def dataset_path(upload_job_uuid: str) -> str:
+    """Where the upload job with this id left its dataset on Expanse."""
+    return f"{UPLOADS_DIR}/{upload_job_uuid}/dataset"
 
 
-def _load_stored_refresh_token() -> Optional[str]:
-    """Read the current refresh token from the database, if available.
-
-    Falls back to None (not an error) when there is no database — this module is
-    also used by standalone scripts that have no service database.
-    """
-    try:
-        from ..database import get_db
-        with get_db() as conn:
-            row = conn.execute(
-                "SELECT value FROM service_credentials WHERE key=%s",
-                (_REFRESH_TOKEN_KEY,),
-            ).fetchone()
-        return row["value"] if row else None
-    except Exception:  # noqa: BLE001 - absence of a DB is not fatal here
-        return None
-
-
-def _store_refresh_token(token: str) -> bool:
-    """Persist a rotated refresh token. Returns True if it was stored."""
-    try:
-        from ..database import get_db
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO service_credentials (key, value) VALUES (%s, %s) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
-                "updated_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')",
-                (_REFRESH_TOKEN_KEY, token),
-            )
-        return True
-    except Exception as e:  # noqa: BLE001
-        # Losing a rotated token means the next refresh fails, so make it loud.
-        print(f"WARNING: could not persist rotated Tapis refresh token: {e}")
-        return False
-
-
-def _load_user_refresh_token(tapis_username: str) -> Optional[str]:
-    """Read a specific user's stored refresh token, if they've connected."""
-    try:
-        from ..database import get_db
-        with get_db() as conn:
-            row = conn.execute(
-                "SELECT refresh_token FROM user_tapis_credentials WHERE tapis_username=%s",
-                (tapis_username,),
-            ).fetchone()
-        return row["refresh_token"] if row else None
-    except Exception:  # noqa: BLE001 - absence of a DB is not fatal here
-        return None
-
-
-def _store_user_refresh_token(tapis_username: str, token: str) -> bool:
-    """Persist (or rotate) one user's refresh token. Returns True if stored."""
-    try:
-        from ..database import get_db
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO user_tapis_credentials (tapis_username, refresh_token) "
-                "VALUES (%s, %s) ON CONFLICT (tapis_username) DO UPDATE "
-                "SET refresh_token = EXCLUDED.refresh_token, "
-                "updated_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS')",
-                (tapis_username, token),
-            )
-        return True
-    except Exception as e:  # noqa: BLE001
-        print(f"WARNING: could not persist Tapis refresh token for {tapis_username}: {e}")
-        return False
-
-
-def _post_token_request(payload: dict) -> dict:
-    import requests
-
-    resp = requests.post(f"{settings.tapis_base_url}/v3/oauth2/tokens",
-                         json=payload, timeout=30)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"Tapis token request failed "
-                           f"({resp.status_code}): {resp.text[:300]}")
-    return resp.json()["result"]
-
-
-def _unwrap(result: dict, key: str) -> Optional[str]:
-    """Pull a token out of Tapis's nested token response shape."""
-    node = result.get(key)
-    if isinstance(node, dict):
-        return node.get(key)
-    return node if isinstance(node, str) else None
-
-
-def bootstrap_refresh_token(username: str, password: str) -> str:
-    """Exchange a password for a refresh token, once, and persist it.
-
-    Run this a single time when setting the service up. Afterwards the password
-    is not needed and should be removed from the service's environment.
-    """
-    if not settings.tapis_client_id or not settings.tapis_client_key:
-        raise TapisNotConfigured(
-            "TAPIS_CLIENT_ID/TAPIS_CLIENT_KEY are required to obtain a refresh "
-            "token. Register an OAuth client via POST /v3/oauth2/clients."
-        )
-    result = _post_token_request({
-        "grant_type": "password",
-        "username": username,
-        "password": password,
-        "client_id": settings.tapis_client_id,
-        "client_key": settings.tapis_client_key,
-    })
-    refresh = _unwrap(result, "refresh_token")
-    if not refresh:
-        raise RuntimeError(
-            "Tapis did not return a refresh token. This happens when the grant "
-            "is made without client credentials."
-        )
-    _store_refresh_token(refresh)
-    return refresh
-
-
-def exchange_authorization_code(code: str, redirect_uri: str) -> tuple[str, str]:
-    """Exchange a browser-flow authorization code for an access + refresh token.
-
-    Called once from the OAuth callback route, right after the user has
-    authenticated in their own browser and Tapis redirected back with `code`.
-    """
-    if not settings.tapis_client_id or not settings.tapis_client_key:
-        raise TapisNotConfigured(
-            "TAPIS_CLIENT_ID/TAPIS_CLIENT_KEY are required for the "
-            "authorization_code exchange."
-        )
-    result = _post_token_request({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": settings.tapis_client_id,
-        "client_key": settings.tapis_client_key,
-    })
-    access = _unwrap(result, "access_token")
-    refresh = _unwrap(result, "refresh_token")
-    if not access or not refresh:
-        raise RuntimeError(
-            "Tapis did not return both an access and refresh token for the "
-            "authorization_code exchange."
-        )
-    return access, refresh
+def dataset_job_uuid(remote_path: Optional[str]) -> Optional[str]:
+    """The id of the upload job that holds a dataset on Expanse, or None if
+    `remote_path` isn't such a dataset (e.g. a path on another system)."""
+    match = _DATASET_PATH.match(remote_path or "")
+    return match.group(1) if match else None
 
 
 def get_userinfo(access_token: str) -> str:
@@ -212,149 +78,34 @@ def get_userinfo(access_token: str) -> str:
     return resp.json()["result"]["username"]
 
 
-def connect_user(code: str, redirect_uri: str) -> str:
-    """Complete the OAuth callback for one browser session: exchange the
-    authorization code, identify the user, and persist their refresh token.
-
-    Returns the connected Tapis username.
-    """
-    access_token, refresh_token = exchange_authorization_code(code, redirect_uri)
-    tapis_username = get_userinfo(access_token)
-    _store_user_refresh_token(tapis_username, refresh_token)
-    return tapis_username
+# One tapipy client per token (keyed by its hash). Building one is slow-ish and, without a tenant
+# id, asks the Tenants API for every tenant first; tokens change only every
+# few hours per user, so a small cache saves both.
+_clients: dict[str, object] = {}
+_clients_lock = threading.Lock()
 
 
-def _access_token_from_refresh(tapis_username: Optional[str] = None) -> str:
-    """Trade a stored refresh token for an access token, persisting rotation.
-
-    `tapis_username=None` (the default) uses the shared service-account
-    credential; a given username uses that user's own connected credential
-    instead — the two are stored and rotated completely independently.
-    """
-    if tapis_username is None:
-        token = _load_stored_refresh_token() or settings.tapis_refresh_token
-    else:
-        token = _load_user_refresh_token(tapis_username)
-    if not token:
-        raise TapisNotConfigured(
-            "no Tapis refresh token available" if tapis_username is None
-            else f"user {tapis_username!r} has not connected a Tapis account"
-        )
-
-    result = _post_token_request({
-        "grant_type": "refresh_token",
-        "refresh_token": token,
-        "client_id": settings.tapis_client_id,
-        "client_key": settings.tapis_client_key,
-    })
-    access = _unwrap(result, "access_token")
-    if not access:
-        raise RuntimeError(f"no access token in refresh response: {list(result)}")
-
-    # Tapis rotates refresh tokens: the one we just used may now be dead, so the
-    # replacement must be persisted or the next refresh will fail.
-    rotated = _unwrap(result, "refresh_token")
-    if rotated and rotated != token:
-        if tapis_username is None:
-            _store_refresh_token(rotated)
-        else:
-            _store_user_refresh_token(tapis_username, rotated)
-    return access
-
-
-# ── connection ─────────────────────────────────────────────────────────────
-
-def _build_client(tapis_username: Optional[str] = None):
+def _call(fn_name: str, token: str, **kwargs):
+    """Invoke one Jobs API method with the given user's access token."""
     from tapipy.tapis import Tapis
 
-    if tapis_username is not None:
-        # Per-user credential: use only that user's own stored refresh token.
-        # Deliberately no fallthrough to the shared/password paths below --
-        # falling back would silently submit the job under the shared
-        # service identity instead of the user it's supposed to belong to.
-        if not settings.tapis_client_id or not settings.tapis_client_key:
-            raise TapisNotConfigured(
-                "TAPIS_CLIENT_ID/TAPIS_CLIENT_KEY are required for per-user "
-                "Tapis credentials."
-            )
-        return Tapis(base_url=settings.tapis_base_url,
-                     access_token=_access_token_from_refresh(tapis_username))
-
-    # 1. OAuth client + refresh token — no user password held by the service.
-    if settings.tapis_client_id and settings.tapis_client_key and (
-            _load_stored_refresh_token() or settings.tapis_refresh_token):
-        return Tapis(base_url=settings.tapis_base_url,
-                     access_token=_access_token_from_refresh())
-
-    # 2. A pre-issued JWT. Expires in ~4h with no way to renew, so this suits
-    #    short-lived scripts rather than a long-running service.
-    if settings.tapis_jwt:
-        return Tapis(base_url=settings.tapis_base_url, access_token=settings.tapis_jwt)
-
-    raise TapisNotConfigured(
-        "Tapis credentials missing. Provide TAPIS_CLIENT_ID + TAPIS_CLIENT_KEY "
-        "(+ a bootstrapped refresh token), or TAPIS_JWT. Set TAPIS_ENABLED=0 "
-        "to run without remote training. The service never stores a user "
-        "password -- see bootstrap_refresh_token() for the shared credential, "
-        "or /auth/tapis/login for a per-user one."
-    )
-
-
-def get_client(tapis_username: Optional[str] = None, force_refresh: bool = False):
-    """Return a cached Tapis session for one identity, building it if needed.
-
-    `tapis_username=None` is the shared service-account session (unchanged
-    default behavior). Passing a username selects that user's own session,
-    cached and refreshed independently under its own key.
-
-    Access tokens are short-lived (hours), and a job can outlive one, so
-    callers re-authenticate on an auth failure rather than assuming the token
-    obtained at startup is still valid.
-    """
-    with _client_lock:
-        if tapis_username not in _clients or force_refresh:
-            _clients[tapis_username] = _build_client(tapis_username)
-        return _clients[tapis_username]
-
-
-def _call(fn_name: str, tapis_username: Optional[str] = None,
-          access_token: Optional[str] = None, **kwargs):
-    """Invoke a jobs API method, retrying once with a fresh token on failure.
-
-    `access_token`, when given, takes priority: build a one-off client
-    directly from it (no cache, no stored credential, no retry -- there is
-    nothing to refresh a bare token to). This is for a token the caller
-    already holds (e.g. one supplied by the caller's own session), as
-    opposed to `tapis_username`, which looks up a token this service
-    persists and rotates itself.
-
-    Otherwise, tapipy surfaces auth failures as assorted exception types
-    depending on the layer that rejects, so rather than pattern-matching
-    messages we simply retry once with a new session; a genuine error fails
-    the same way twice.
-    """
-    if access_token is not None:
-        from tapipy.tapis import Tapis
-        client = Tapis(base_url=settings.tapis_base_url, access_token=access_token)
-        return getattr(client.jobs, fn_name)(**kwargs)
-    try:
-        return getattr(get_client(tapis_username).jobs, fn_name)(**kwargs)
-    except Exception:
-        return getattr(get_client(tapis_username, force_refresh=True).jobs, fn_name)(**kwargs)
+    if not token:
+        raise TapisNotConfigured("no Tapis login to act with")
+    key = hashlib.sha256(token.encode()).hexdigest()
+    with _clients_lock:
+        client = _clients.get(key)
+    if client is None:
+        client = Tapis(base_url=settings.tapis_base_url,
+                       tenant_id=user_tokens.token_claims(token).get("tapis/tenant_id"),
+                       access_token=token)
+        with _clients_lock:
+            if len(_clients) >= 64:
+                _clients.clear()
+            _clients[key] = client
+    return getattr(client.jobs, fn_name)(**kwargs)
 
 
 # ── submit ─────────────────────────────────────────────────────────────────
-
-def _work_base() -> str:
-    if not settings.tapis_work_base:
-        raise TapisNotConfigured(
-            "TAPIS_WORK_BASE must be set to a directory writable by the "
-            "execution system's effective user (e.g. /fs/ess/<project>/<user>). "
-            "Without it, jobs inherit the system's default working directory, "
-            "which is typically not writable and fails during input processing."
-        )
-    return settings.tapis_work_base.rstrip("/")
-
 
 def build_job_body(
     *,
@@ -369,10 +120,9 @@ def build_job_body(
     lr: Optional[float] = None,
     warmup: Optional[int] = None,
     max_minutes: Optional[int] = None,
-    stage_mode: Optional[str] = None,
     submitted_by: Optional[str] = None,
 ) -> dict:
-    """Assemble a Tapis job request.
+    """Assemble a training job request.
 
     Several details here are load-bearing and were established by testing
     against the live system:
@@ -381,24 +131,27 @@ def build_job_body(
       does not quote appArgs (applications define their own conventions), and
       the structure string contains parentheses, which are a bash syntax error
       unquoted in the generated tapisjob.sh.
-    * The exec/archive directories must be overridden. The system's default
-      jobWorkingDir is not writable by our effective user, and jobs fail while
-      processing inputs.
     * max_iters truncates each *epoch*, it does not bound the run, so demo
       mode must also force epochs=1 — mirroring auto_nas._train_via_timm_trainer.
     * warmup must then be clamped below the epoch count. The cosine schedule
       asserts stop_instances > warmup_instances, so warming up for longer than
       the whole run aborts training partway through the first epoch.
+
+    The job's folders, allocation, queue and container settings are fixed in
+    the app, and the job script in the image (src/training/expanse_job.py)
+    accepts only these arguments.
     """
+    upload_uuid = dataset_job_uuid(remote_dataset_path)
+    if upload_uuid is None:
+        raise TapisNotConfigured(
+            f"the dataset isn't on Expanse ({remote_dataset_path}), so it can't be trained there")
     if max_iters is not None:
         epochs = 1
     if warmup is not None:
         warmup = min(warmup, max(epochs - 1, 0))
 
-    work = _work_base()
-    job_dir = f"{work}/tapis-jobs/" + "${JobUUID}"
-
     app_args = [
+        {"name": "dataset", "arg": f"--dataset {upload_uuid}"},
         {"name": "plainnet_struct", "arg": f"--plainnet_struct '{structure_str}'"},
         {"name": "num_classes", "arg": f"--num_classes {num_classes}"},
         {"name": "epochs", "arg": f"--epochs {epochs}"},
@@ -409,45 +162,12 @@ def build_job_body(
         app_args.append({"name": "batch_per_gpu", "arg": f"--batch_size_per_gpu {batch_size}"})
     if workers is not None:
         app_args.append({"name": "workers", "arg": f"--workers_per_gpu {workers}"})
+    if lr is not None:
+        app_args.append({"name": "lr", "arg": f"--lr_per_256 {lr}"})
     if warmup is not None:
-        app_args.append({"name": "lr", "arg": (
-            f"--lr_per_256 {lr if lr is not None else 0.1} --target_lr_per_256 0.0 "
-            f"--lr_mode cosine --warmup {warmup}")})
+        app_args.append({"name": "warmup", "arg": f"--warmup {warmup}"})
 
-    # How the dataset reaches the container.
-    #
-    # in_place: bind-mount it straight off the execution system's filesystem.
-    #   Nothing is transferred, so this is unaffected by Tapis's 10,000-file
-    #   limit on a single transfer -- real image datasets blow past that (the
-    #   OSA dataset is ~107,000 files) and the job fails during staging.
-    #
-    # copy: let Tapis stage it into the job's input directory. Only viable for
-    #   small datasets, and duplicates the data once per job.
-    mode = (stage_mode or settings.tapis_stage_mode or "in_place").lower()
-    container_args: list[dict] = []
-    file_inputs: list[dict] = []
-
-    if mode == "copy":
-        file_inputs.append({
-            "name": "dataset",
-            # rootDir on the execution system is "/", so an absolute path maps
-            # directly into a tapis:// URL.
-            "sourceUrl": f"tapis://{settings.tapis_system}{remote_dataset_path}",
-            "targetPath": "data",
-        })
-        # The app's own default --data_dir /workspace/data then applies.
-    else:
-        container_args.append({
-            "name": "dataset_bind",
-            "arg": f"--bind {remote_dataset_path}:/dataset",
-        })
-        app_args.append({"name": "data_dir", "arg": "--data_dir /dataset"})
-
-    parameter_set: dict = {"appArgs": app_args}
-    if container_args:
-        parameter_set["containerArgs"] = container_args
-
-    body = {
+    return {
         "name": name,
         "appId": settings.tapis_app_id,
         "appVersion": settings.tapis_app_version,
@@ -456,84 +176,114 @@ def build_job_body(
         "description": f"FNAS-LCD training ({num_classes} classes)"
                        + (f" -- submitted via fnas-lcd by {submitted_by}" if submitted_by else ""),
         "maxMinutes": max_minutes or settings.tapis_max_minutes,
-        "execSystemInputDir": job_dir,
-        "execSystemExecDir": job_dir,
-        "execSystemOutputDir": f"{job_dir}/output",
-        "archiveSystemId": settings.tapis_system,
-        "archiveSystemDir": f"{work}/tapis-archive/" + "${JobUUID}",
-        "parameterSet": parameter_set,
+        "parameterSet": {"appArgs": app_args},
     }
-    if file_inputs:
-        body["fileInputs"] = file_inputs
-    return body
 
 
-def submit_training(*, tapis_username: Optional[str] = None,
-                    access_token: Optional[str] = None,
-                    submitted_by: Optional[str] = None, **kwargs) -> str:
-    """Submit a training job. Returns the Tapis job UUID.
+def submit_training(token: str, **kwargs) -> str:
+    """Submit a training job (see build_job_body) as the user whose token
+    this is. Returns the Tapis job UUID."""
+    return _call("submitJob", token, **build_job_body(**kwargs)).uuid
 
-    `tapis_username`/`access_token` select which Tapis identity actually
-    submits and owns the job (`tapis_username=None` is the shared service
-    account, the default). `submitted_by` is recorded on the job's
-    description for attribution only, independent of that -- the two no
-    longer have to match: every job currently runs under the shared service
-    account regardless of who submitted it (see `nas_runner._run_remote_training`),
-    with `submitted_by` kept so attribution is visible from Tapis's own
-    records, not just our database. Falls back to `tapis_username` when not
-    given, for any other caller that still wants the old matching behavior.
-    """
-    body = build_job_body(
-        submitted_by=submitted_by if submitted_by is not None else tapis_username,
-        **kwargs,
-    )
-    resp = _call("submitJob", tapis_username=tapis_username, access_token=access_token, **body)
-    return resp.uuid
+
+def submit_upload(token: str, *, source_url: str, name: str,
+                  uploaded_by: Optional[str] = None) -> str:
+    """Submit the job that copies one dataset archive onto Expanse: Tapis
+    downloads it from `source_url` into the job's folder, and the job unpacks
+    it there. Returns the job UUID, which then names the dataset's folder."""
+    return _call("submitJob", token, **{
+        "name": name,
+        "appId": settings.tapis_upload_app_id,
+        "appVersion": settings.tapis_upload_app_version,
+        "description": "FNAS-LCD dataset upload"
+                       + (f" -- uploaded via fnas-lcd by {uploaded_by}" if uploaded_by else ""),
+        "fileInputs": [{"name": "archive", "sourceUrl": source_url}],
+    }).uuid
+
+
+def submit_delete(token: str, *, upload_job_uuid: str, name: str) -> str:
+    """Submit the job that deletes one uploaded dataset from Expanse. The job
+    deletes only a dataset that the same Tapis user uploaded. Returns the job
+    UUID."""
+    if not re.fullmatch(_JOB_UUID, upload_job_uuid):
+        raise ValueError(f"not an upload job id: {upload_job_uuid!r}")
+    return _call("submitJob", token, **{
+        "name": name,
+        "appId": settings.tapis_upload_app_id,
+        "appVersion": settings.tapis_upload_app_version,
+        "description": f"FNAS-LCD dataset delete ({upload_job_uuid})",
+        "parameterSet": {"appArgs": [{"name": "mode", "arg": f"delete {upload_job_uuid}"}]},
+    }).uuid
 
 
 # ── monitor ────────────────────────────────────────────────────────────────
 
-def get_status(uuid: str, tapis_username: Optional[str] = None,
-               access_token: Optional[str] = None) -> str:
-    return _call("getJobStatus", tapis_username=tapis_username,
-                 access_token=access_token, jobUuid=uuid).status
+def get_status(token: str, uuid: str) -> str:
+    return _call("getJobStatus", token, jobUuid=uuid).status
 
 
-def get_last_message(uuid: str, tapis_username: Optional[str] = None,
-                     access_token: Optional[str] = None) -> str:
+def get_last_message(token: str, uuid: str) -> str:
     try:
-        return _call("getJob", tapis_username=tapis_username,
-                     access_token=access_token, jobUuid=uuid).lastMessage or ""
+        return _call("getJob", token, jobUuid=uuid).lastMessage or ""
     except Exception:  # noqa: BLE001 - diagnostics only
         return ""
 
 
-def cancel(uuid: str, tapis_username: Optional[str] = None,
-          access_token: Optional[str] = None) -> None:
-    _call("cancelJob", tapis_username=tapis_username, access_token=access_token, jobUuid=uuid)
+def cancel(token: str, uuid: str) -> None:
+    _call("cancelJob", token, jobUuid=uuid)
+
+
+# Consecutive failed status checks after which a job counts as lost.
+_MAX_STATUS_FAILURES = 5
+
+
+def watch(uuid: str, username: str, done: Callable[[str], bool] = TERMINAL_STATES.__contains__,
+          stop: Optional[threading.Event] = None) -> Optional[str]:
+    """Check a job's state with its owner's newest token until `done(state)`,
+    and return that state. Queue waits can be long, so this has no timeout of
+    its own -- the job's own time limit bounds it.
+
+    When the owner's token has expired, this waits for them to open
+    FNAS-LCD again (user_tokens.wait_for). Returns None if `stop` is set
+    first. Raises if Tapis can't be reached several times in a row.
+    """
+    stop = stop or threading.Event()
+    failures = 0
+    while True:
+        token = user_tokens.wait_for(username, stop)
+        if token is None:
+            return None
+        try:
+            state = get_status(token, uuid)
+            failures = 0
+        except Exception:  # noqa: BLE001
+            failures += 1
+            if failures >= _MAX_STATUS_FAILURES:
+                raise
+            state = None
+        if state is not None and done(state):
+            return state
+        if stop.wait(settings.tapis_poll_seconds):
+            return None
 
 
 # ── outputs ────────────────────────────────────────────────────────────────
 
-def list_outputs(uuid: str, tapis_username: Optional[str] = None,
-                 access_token: Optional[str] = None) -> list[str]:
+def list_outputs(token: str, uuid: str) -> list[str]:
     """Names of files in the job's output directory (empty on failure)."""
     try:
         # The API path is /output/list/{outputPath} and outputPath must end
         # with '/'; it is relative to the job's output directory.
-        listing = _call("getJobOutputList", tapis_username=tapis_username,
-                        access_token=access_token, jobUuid=uuid, outputPath="/")
+        listing = _call("getJobOutputList", token, jobUuid=uuid, outputPath="/")
     except Exception:  # noqa: BLE001
         return []
     return [getattr(f, "name", str(f)) for f in listing]
 
 
-def download_output(uuid: str, name: str, tapis_username: Optional[str] = None,
-                    access_token: Optional[str] = None) -> Optional[bytes]:
+def download_output(token: str, uuid: str, name: str) -> Optional[bytes]:
     """Fetch one output file. Returns None if it is absent or unreadable."""
     try:
-        data = _call("getJobOutputDownload", tapis_username=tapis_username,
-                     access_token=access_token, jobUuid=uuid, outputPath=name)
+        data = _call("getJobOutputDownload", token, jobUuid=uuid, outputPath=name)
     except Exception:  # noqa: BLE001
         return None
     if isinstance(data, str):
@@ -541,166 +291,12 @@ def download_output(uuid: str, name: str, tapis_username: Optional[str] = None,
     return data
 
 
-# ── uploaded datasets ──────────────────────────────────────────────────────
-#
-# An upload becomes trainable by being copied to the execution system, into
-# its own folder under uploads_base(), and unpacked there by a small Tapis
-# app (tapis/fnas-lcd-unpack-*.app.json). Training then bind-mounts that
-# folder exactly like a pre-configured dataset. All of it runs as the shared
-# service account, like training.
-
-# The unpack app's command line hardcodes this name: the service uploads the
-# archive as <dataset folder>/dataset.tar and binds that folder at /dataset.
-UNPACK_ARCHIVE_NAME = "dataset.tar"
-
-
-def uploads_base() -> str:
-    """Folder on the execution system that holds uploaded datasets."""
-    return f"{_work_base()}/datasets/uploads"
-
-
-def _files_call(fn_name: str, **kwargs):
-    """Invoke a Files API method as the shared service account, retrying once
-    with a fresh session on failure, like _call does for jobs."""
-    from tapipy.errors import NotFoundError
-
-    try:
-        return getattr(get_client().files, fn_name)(**kwargs)
-    except NotFoundError:
-        raise  # a missing path stays missing; no point retrying
-    except Exception:
-        return getattr(get_client(force_refresh=True).files, fn_name)(**kwargs)
-
-
-# Files API paths are relative to the system's rootDir, which is "/" on the
-# execution system, so an absolute path is passed without its leading slash.
-
-def make_dir(path: str) -> None:
-    _files_call("mkdir", systemId=settings.tapis_system, path=path.lstrip("/"))
-
-
-def delete_upload_dir(path: str) -> None:
-    """Delete one uploaded dataset's folder on the execution system.
-
-    Refuses anything but a folder directly inside uploads_base(), so neither
-    a bug nor a bad database value can remove anything else in the service
-    account's space: its other datasets, job folders or the training image.
-    A folder that is already gone counts as deleted.
-    """
-    from tapipy.errors import NotFoundError
-
-    base = uploads_base()
-    target = posixpath.normpath(path)
-    if posixpath.dirname(target) != base:
-        raise ValueError(f"refusing to delete {path!r}: not an upload folder in {base}")
-    try:
-        _files_call("delete", systemId=settings.tapis_system, path=target.lstrip("/"))
-    except NotFoundError:
-        pass
-
-
-def delete_upload_archive(dataset_dir: str) -> None:
-    """Delete the archive in one uploaded dataset's folder on the execution
-    system, once the unpack job has extracted it."""
-    base = uploads_base()
-    target = posixpath.normpath(dataset_dir)
-    if posixpath.dirname(target) != base:
-        raise ValueError(f"refusing to delete in {dataset_dir!r}: not an upload folder in {base}")
-    _files_call("delete", systemId=settings.tapis_system,
-                path=f"{target}/{UNPACK_ARCHIVE_NAME}".lstrip("/"))
-
-
-class _MultipartFileBody:
-    """A multipart/form-data body holding one file, read from disk in chunks
-    as it is sent. requests streams any body that has read() and a length,
-    so the file never has to fit in memory -- tapipy's own upload helper
-    reads it whole, and an upload can be many GB."""
-
-    def __init__(self, path: Path):
-        self.boundary = secrets.token_hex(16)
-        head = (f"--{self.boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
-                "Content-Type: application/octet-stream\r\n\r\n").encode()
-        tail = f"\r\n--{self.boundary}--\r\n".encode()
-        self._file = open(path, "rb")
-        self._parts = [io.BytesIO(head), self._file, io.BytesIO(tail)]
-        self._length = len(head) + path.stat().st_size + len(tail)
-
-    def __len__(self) -> int:
-        return self._length
-
-    def read(self, size: int = -1) -> bytes:
-        chunks = []
-        while self._parts and (size < 0 or size > 0):
-            data = self._parts[0].read(size)
-            if not data:
-                self._parts.pop(0)
-                continue
-            chunks.append(data)
-            if size > 0:
-                size -= len(data)
-        return b"".join(chunks)
-
-    def close(self) -> None:
-        self._file.close()
-
-
-def upload_file(local_path: Path, remote_path: str) -> None:
-    """Upload a local file to `remote_path` on the execution system as the
-    shared service account, streaming it from disk (Files API "insert")."""
-    import requests
-
-    url_path = quote(remote_path.lstrip("/"))
-
-    def attempt(client):
-        body = _MultipartFileBody(local_path)
-        try:
-            return requests.post(
-                f"{client.base_url}/v3/files/ops/{settings.tapis_system}/{url_path}",
-                data=body,
-                headers={"X-Tapis-Token": client.get_access_jwt(),
-                         "Content-Type": f"multipart/form-data; boundary={body.boundary}"},
-                # Generous read timeout: Tapis may only answer once it has
-                # moved the whole file on to the execution system.
-                timeout=(30, 3600),
-            )
-        finally:
-            body.close()
-
-    # Retry once with a fresh session, as _call does: an expired token is
-    # refused with a 401, or by the server closing the connection mid-send.
-    try:
-        resp = attempt(get_client())
-        retry = resp.status_code == 401
-    except requests.ConnectionError:
-        retry = True
-    if retry:
-        resp = attempt(get_client(force_refresh=True))
-    if resp.status_code >= 400:
-        raise RuntimeError(f"file upload failed ({resp.status_code}): {resp.text[:300]}")
-
-
-def submit_unpack(*, dataset_dir: str, name: str, uploaded_by: Optional[str] = None) -> str:
-    """Submit the job that unpacks <dataset_dir>/dataset.tar in place on the
-    execution system, as the shared service account. Returns the job UUID."""
-    work = _work_base()
-    job_dir = f"{work}/tapis-jobs/" + "${JobUUID}"
-    body = {
-        "name": name,
-        "appId": settings.tapis_unpack_app_id,
-        "appVersion": settings.tapis_unpack_app_version,
-        "description": "FNAS-LCD dataset unpack"
-                       + (f" -- uploaded via fnas-lcd by {uploaded_by}" if uploaded_by else ""),
-        # Same writable directories as training jobs (see build_job_body).
-        "execSystemInputDir": job_dir,
-        "execSystemExecDir": job_dir,
-        "execSystemOutputDir": f"{job_dir}/output",
-        "archiveSystemId": settings.tapis_system,
-        "archiveSystemDir": f"{work}/tapis-archive/" + "${JobUUID}",
-        "parameterSet": {
-            "containerArgs": [
-                {"name": "dataset_bind", "arg": f"--bind {dataset_dir}:/dataset"},
-            ],
-        },
-    }
-    return _call("submitJob", **body).uuid
+def failure_detail(uuid: str, username: str, state: str, log_chars: int = 2000) -> str:
+    """Why a job ended without finishing: Tapis's last message plus the end
+    of the job's log, read with its owner's newest token."""
+    token = user_tokens.wait_for(username)
+    detail = get_last_message(token, uuid) or state
+    log = download_output(token, uuid, LOG_FILE)
+    if log:
+        detail += "\n" + log.decode(errors="replace")[-log_chars:]
+    return detail
