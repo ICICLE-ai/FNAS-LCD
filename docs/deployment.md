@@ -35,37 +35,23 @@ running pod needs:
 
 - Postgres connection info (`POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB`)
 - Object storage (`S3_ENDPOINT_URL`/`ACCESS_KEY`/`SECRET_KEY`/`BUCKET`)
-- If remote training is enabled (`TAPIS_ENABLED=1`): a Tapis OAuth client
-  (`TAPIS_CLIENT_ID`/`KEY`); the refresh token of the shared service
-  account that every training job runs under (seeded once with
-  `TAPIS_REFRESH_TOKEN` or `bootstrap_refresh_token()`; Tapis rotates it on
-  every use, so the service keeps the current one in its database); and
-  `TAPIS_WORK_BASE`, a directory on the execution system that account can
-  write to. Users are identified separately: by the `X-Tapis-Token` cookie
-  a hosting platform's login sets, or by connecting an account on the
-  Account page (see `architecture.md`).
+- If remote training is enabled (`TAPIS_ENABLED=1`): no Tapis credentials.
+  Each user's jobs are submitted with their own token, from the
+  `X-Tapis-Token` cookie the pod's login sets (see `architecture.md`).
+  `PUBLIC_URL` must be the pod's public address, and the pod's networking
+  must let `/upload-links/` through without login (Pods'
+  `tapis_auth_excluded_paths`), because Tapis downloads uploaded datasets
+  from temporary links there.
 
 ## Tapis apps
 
-Training jobs run the `fnas-lcd-train` app (`tapis/fnas-lcd-train-0.1.3.app.json`).
-Uploaded datasets additionally need the small `fnas-lcd-unpack` app
-(`tapis/fnas-lcd-unpack-0.1.0.app.json`), which unpacks an uploaded dataset in
-place on the execution system. Until it is registered and shared, uploads fail
-at the copying step, and the dataset's page shows Tapis's error. To register
-it, once:
+Training jobs, and the jobs that copy uploaded datasets onto Expanse or
+delete them, run through the two apps in `tapis/`. They must be registered
+before first use, and again whenever they change; see `tapis/README.md`.
+Until then, uploads and training fail, and the dataset's or job's page
+shows Tapis's error.
 
-1. Create the app from the JSON file, under any Tapis account in the tenant
-   (TapisUI: Apps → create, pasting the JSON; or `POST /v3/apps`).
-2. Share it with the account the service runs jobs as (the one whose
-   refresh token the pod holds), so that account may launch it:
-   `POST /v3/apps/share/fnas-lcd-unpack` with `{"users": ["<that account>"]}`.
-
-Its paths (`/fs/ess/PAS2699/...`), queue (`cpu`) and `--account=PAS2699` are
-Pitzer-specific, like the training app's. The service sends its own job
-directories (from `TAPIS_WORK_BASE`) with every job; the app and version it
-uses can be changed with `TAPIS_UNPACK_APP_ID`/`TAPIS_UNPACK_APP_VERSION`.
-
-## Current status (October 2026)
+## Current status (November 2026)
 
 **The pod runs** at https://fnaslcd.pods.icicleai.tapis.io, behind the
 pod's Tapis login. That login sets the `X-Tapis-Token` cookie the app uses
@@ -73,10 +59,18 @@ to identify users (`REQUIRE_TAPIS_TOKEN` isn't set). ICICLE staff
 configured the database, object storage and Tapis settings on the pod. Its
 logs are visible in TapisUI.
 
-**Training** runs on OSC Pitzer under one shared service account, whose
-refresh token the pod holds, on the PAS2699 allocation
-(`TAPIS_WORK_BASE=/fs/ess/PAS2699/jhyan`). Uploaded datasets are copied
-there before they can be trained (see "Tapis apps" above).
+**Training** runs on SDSC Expanse (`expanse-tapis-static`), with each
+user's own ICICLE login, through the apps in `tapis/`. Every job runs as
+Expanse's shared `harvest` account and is charged to the `uot260`
+allocation, like other ICICLE services' jobs there. Uploaded datasets are
+copied there before they can be trained. Expanse ends a job after 800
+minutes and runs at most 10 of a user's jobs at a time per queue; SDSC
+deletes the datasets 90 days after they're written. The site shows all
+three limits.
+
+Training used to run on OSC Pitzer under one shared account. The pod
+still has that setup's settings (`TAPIS_CLIENT_ID`, `TAPIS_CLIENT_KEY`,
+`TAPIS_REFRESH_TOKEN`, `TAPIS_WORK_BASE`); this version ignores them.
 
 **The deploy pipeline stops before restarting the pod.** `deploy.yaml`
 uses v2.2.2 of the shared pipeline. Its "Deploy image and verify rollout"

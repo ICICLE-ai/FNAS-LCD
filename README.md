@@ -39,10 +39,10 @@ a web service (search, live job tracking, model download).
    docker compose ps   # all three services should show Up / healthy
    ```
 2. Open `http://localhost:8000` in a browser.
-3. If remote training is enabled (`TAPIS_ENABLED=1` — see
-   [Configure remote training](#configure-remote-training-tapis) below), go to
-   **Account** and connect your Tapis account first; job submission is
-   rejected otherwise. With `TAPIS_ENABLED=0` (the default), skip this step.
+3. Submitting a job needs a Tapis login, which the app reads from an
+   `X-Tapis-Token` cookie (on an ICICLE pod, its login sets it). Locally, log in
+   at https://icicleai.tapis.io/v3/oauth2/webapp, copy the access token it shows,
+   and add it in your browser as a cookie named `X-Tapis-Token` for `localhost`.
 4. On the **Search** page, pick the bundled toy dataset (100 classes), a target device
    (e.g. "Jetson GPU"), and a latency budget in milliseconds (e.g. `20`), then submit.
 5. You'll land back on the dashboard with a "Submitted job #N" confirmation. Click
@@ -94,58 +94,53 @@ Go to **Datasets → Upload Dataset**, provide a name and a `.zip`/`.tar`/`.tar.
 archive in ImageFolder format (max 10 GB). The service checks the archive (no absolute
 paths, `..`, links or special files, and it must fit in the free disk space), extracts
 it, validates the `train/` structure, and detects the class count automatically. macOS
-metadata (`__MACOSX/`, `._*`, `.DS_Store`) is skipped. Uploading requires a known Tapis
-user, the same as submitting a job; only the uploader can delete the dataset
+metadata (`__MACOSX/`, `._*`, `.DS_Store`) is skipped. Uploading requires a Tapis
+login, the same as submitting a job; only the uploader can delete the dataset
 (`DELETE /api/datasets/{id}`), and only while no job has used it.
 
-With remote training enabled, an upload is then copied to the execution system in the
-background (status **copying** on its page) and becomes usable once it is **ready** —
-see [Configure remote training](#configure-remote-training-tapis).
+With remote training enabled, an upload is then copied to SDSC Expanse in the
+background (status **copying** on its page) and becomes usable once it is **ready**.
+Deleting it also deletes that copy (status **deleting** until done). SDSC deletes the
+copy 90 days after the upload; the dataset's page shows the date, and the dataset is
+then **expired** — see [Configure remote training](#configure-remote-training-tapis).
 
 ## Check or cancel a running job
 The **Jobs** page lists every job with live status and filtering by status. A job can
 be cancelled from its detail page while still `pending`/`searching`.
 
 ## Configure remote training (Tapis)
-Training runs as a real GPU job on an HPC system (OSC Pitzer) via
+Training runs as a real GPU job on SDSC Expanse via
 [Tapis](https://tapis-project.org/), not in this container. With
-`TAPIS_ENABLED=0` (the default) the service needs no Tapis credentials at
-all. To enable it:
+`TAPIS_ENABLED=0` (the default), nothing runs on Expanse: jobs skip training
+and export an untrained model. With `TAPIS_ENABLED=1` (see `.env.example` for
+the related settings):
 
-1. Set `TAPIS_ENABLED=1`, `TAPIS_CLIENT_ID`/`TAPIS_CLIENT_KEY` (a registered
-   Tapis OAuth client), and `TAPIS_WORK_BASE` (a directory writable by the
-   execution system's user — required, no default) in `.env`. See
-   `.env.example` for the full list and defaults.
-2. Each web-service user connects their **own** Tapis account from the
-   **Account** page (`/account`) — a standard OAuth `authorization_code`
-   login redirect. The service never sees or stores a password; jobs
-   submitted from a connected session run and are billed under that user's
-   own Tapis identity. A session with no connected account cannot submit
-   jobs.
-3. (Optional, for jobs with no connected owner — e.g. re-attached on a
-   restart) seed a *shared* fallback credential once via
-   `TAPIS_REFRESH_TOKEN`, or call
-   `tapis_service.bootstrap_refresh_token(username, password)` a single
-   time — the password is not needed again afterward, and Tapis rotates the
-   refresh token on every use, so the current one lives in the database, not
-   the environment.
+- Each user's jobs are submitted with their own Tapis login, the token in
+  their `X-Tapis-Token` cookie. The service holds no Tapis credentials of its
+  own. It keeps each user's newest token in memory only, to track their jobs;
+  if the token expires while a job runs, the job carries on, and the service
+  collects its result the next time that user opens FNAS-LCD.
+- Jobs run through the two Tapis apps in `tapis/`, which must be registered
+  once (see `tapis/README.md`). On Expanse they run as a shared account, so
+  other ICICLE users can read the data there.
+- Tapis downloads each uploaded dataset from a temporary link under
+  `PUBLIC_URL` (`/upload-links/...`), so that path must be reachable without
+  logging in.
+- Expanse ends a job after 800 minutes (`TAPIS_MAX_MINUTES` can only lower
+  this) and runs at most 10 of a user's jobs at a time per queue, and SDSC
+  deletes datasets 90 days after they're uploaded. The site shows these limits.
 
 **Hosted behind a login portal (e.g. an ICICLE pod).** If the platform
 logs users in and passes their Tapis token to the app as an `X-Tapis-Token`
 cookie, set `REQUIRE_TAPIS_TOKEN=1`. Every page and API route except
-`/health` and `/static` then requires a valid token (checked against Tapis),
-the token identifies the user, and jobs are submitted with it directly — no
-separate "connect your account" step. Leave it `0` (the default) for local
-use, where there is no portal to supply the cookie and the Account-page flow
-above applies instead.
+`/health`, `/static` and the upload links then requires a valid token
+(checked against Tapis). Leave it `0` (the default) for local use.
 
-Datasets must exist on the execution system: this container's own dataset
-paths mean nothing there. Pre-configured datasets name their location with
-`remote_path` in `src/web/config.py`. Uploaded datasets are copied there
-automatically, as the shared service account, into
-`$TAPIS_WORK_BASE/datasets/uploads/`, and unpacked by a small Tapis app,
-`tapis/fnas-lcd-unpack-0.1.0.app.json`, which must be registered once (see
-`docs/deployment.md`).
+Datasets must exist on Expanse: this container's own dataset paths mean
+nothing there. Uploaded datasets are copied there automatically. A built-in
+dataset is offered for training only if it names its location on Expanse
+with `remote_path` in `src/web/config.py`; for the toy dataset, set
+`TOY_DATASET_REMOTE_PATH` to the dataset folder of an upload of it.
 
 ## Persist data across container restarts
 `docker compose down` stops containers but keeps the named volumes (Postgres data,
@@ -194,8 +189,11 @@ storage later). Jobs run in a background thread per submission, with the UI poll
 - `src/enumeration/`, `src/scoring/` — frontier search and analytic scoring core
 - `src/model/` — PlainNet/MasterNet architecture definitions
 - `src/DataLoader/` — ImageFolder dataset loading
-- `src/training/` — trainer (`timm_trainer.py`)
+- `src/training/` — trainer (`timm_trainer.py`) and the entry point of the jobs on
+  Expanse (`expanse_job.py`)
 - `src/web/` — the FastAPI web service (UI + JSON API)
+- `tapis/` — the Tapis apps the jobs on Expanse run through, and their registration
+  script
 - `data/block_lookup/` — precomputed per-block cost/score lookup table
 - `data/toy_dataset/` — small bundled ImageFolder dataset for smoke testing
 - `docs/architecture.md` — target architecture and identity model

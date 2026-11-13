@@ -1,31 +1,41 @@
-# Tapis App artifacts
+# Tapis apps
 
-For Sina / whoever's porting this to Vista.
+FNAS-LCD's jobs on SDSC Expanse run through two Tapis apps:
 
-## `fnas-lcd-train-0.1.3.app.json`
+- `fnas-lcd-expanse-train-0.1.0.app.json` trains one searched architecture
+  on one GPU (queue `tapisGPUshared`).
+- `fnas-lcd-expanse-upload-0.1.0.app.json` copies an uploaded dataset onto
+  Expanse, or deletes one (queue `tapisShared`). Tapis downloads the dataset
+  from a temporary link the service gives it.
 
-The real, live Tapis App definition (`GET /v3/apps/fnas-lcd-train/0.1.3`),
-pulled 2026-10-07. This is what Tapis actually has registered — not
-something hand-written, so it's authoritative for what the App expects:
-`containerImage`, `appArgs`, `containerArgs`, resource limits, etc.
+Both run on `expanse-tapis-static`, where every job runs as Expanse's shared
+`harvest` account and is charged to the `uot260` allocation. Each upload is
+kept in `/jobs/fnas-lcd/uploads/<upload job id>/dataset`, in Expanse's
+scratch space, which SDSC purges 90 days after files are written.
 
-The App is **not public** (`isPublic: false`), owned by `jinghuayan96`.
-You likely can't query this yourself yet — either ask to be added to its
-share list, or treat this file as your copy of it for now.
+Both apps run the service's own image,
+`ghcr.io/icicle-ai/fnas-lcd:<service-version>`. Its `entrypoint.sh` hands the
+job's mode (`train`, `upload` or `delete`) to `src/training/expanse_job.py`,
+which accepts only the arguments the service sends. The apps fix everything
+else: the system, the job folders, the queue, the allocation and the
+container options.
 
-## `trainer.def`
+The apps are owned by one ICICLE account and shared with every ICICLE user.
+Users submit jobs with their own login. Because the job folders are set in
+the app, Tapis lets each job use the app owner's permission on them, so users
+need no setup of their own.
 
-**Reconstructed, not the original.** The real build file for
-`trainer.sif` (the `.sif` this App's `containerImage` points at, on
-Pitzer's filesystem — not a registry image) could not be found on any
-machine or backup as of 2026-10-07. What's here is a best-effort rebuild
-from `fnas-lcd-train-0.1.3.app.json`'s documented CLI/runtime and this
-repo's own `src/training/timm_trainer.py` — see the comment block at the
-top of the file for exactly what's confirmed vs. reconstructed.
+## Registering or updating the apps
 
-**Before relying on this for Vista:** build it and run a short smoke-test
-job (`--max_iters 5`, matching how local testing was done) against Pitzer
-first, where there's something to compare against, before assuming it's
-equivalent to what's actually been running in production. If it behaves
-differently, that's real signal the reconstruction missed something, not
-a Vista-specific problem.
+Run this as the account that owns the apps:
+
+    .venv/bin/python tapis/register_apps.py
+
+It asks for that account's Tapis username and password, which are never
+printed or saved. It creates each app, or updates it to match its file, and
+shares it with every ICICLE user.
+
+The image tag in both files must match `service-version` in
+`icicle-service.yaml`, so that the jobs run the same code as the website; the
+script checks this. When `service-version` changes, change the tag in both
+files and run the script again.
