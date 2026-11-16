@@ -7,7 +7,7 @@
   status: "AlphaRelease"
   description: "Latency-constrained neural architecture search: an analytic, zero-shot proxy score combined with frontier enumeration over a precomputed block lookup table selects an architecture under a target latency budget, then trains and exports it. Ships as a web service (search, job tracking, model download) plus a CLI."
   componentVersion: "0.1.0"
-  targetIcicleRelease: "2026-10"
+  targetIcicleRelease: "2026-11"
 
   # CONFIRM: license not yet chosen — release guidance says to consult the
   # IP department before picking one. Placeholder URL below assumes the
