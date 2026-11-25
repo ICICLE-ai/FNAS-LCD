@@ -42,11 +42,8 @@ def _dataset_status(row) -> str:
 def _dataset_for_jobs(conn, dataset_id: int, user: str | None):
     """The dataset a search or job asks for, if `user` may use it."""
     row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-    if row is None or not dataset_service.can_see(row, user):
+    if row is None or not dataset_service.can_use(row, user):
         raise HTTPException(404, "Dataset not found")
-    if not dataset_service.can_use(row, user):
-        raise HTTPException(403, "Only the user who uploaded this dataset can search or "
-                                 "train with it.")
     return row
 
 
@@ -115,7 +112,7 @@ def list_devices():
 @router.get("/datasets", response_model=DatasetListResponse)
 def list_datasets(session: dict = Depends(get_session)):
     """The datasets you can search and train with: the built-in ones and
-    your own uploads."""
+    your own uploads (an admin's: every upload)."""
     with get_db() as conn:
         rows = dataset_service.usable_datasets(conn, session.get("tapis_username"))
     return DatasetListResponse(datasets=[_row_to_dataset(r) for r in rows])
@@ -125,7 +122,7 @@ def list_datasets(session: dict = Depends(get_session)):
 def get_dataset(dataset_id: int, session: dict = Depends(get_session)):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-    if row is None or not dataset_service.can_see(row, session.get("tapis_username")):
+    if row is None or not dataset_service.can_use(row, session.get("tapis_username")):
         raise HTTPException(404, "Dataset not found")
     return _row_to_dataset(row)
 
@@ -191,7 +188,7 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
         row = conn.execute(
             "SELECT * FROM datasets WHERE id=%s FOR UPDATE", (dataset_id,)
         ).fetchone()
-        if row is None or not dataset_service.can_see(row, username):
+        if row is None or not dataset_service.can_use(row, username):
             raise HTTPException(404, "Dataset not found")
         if not row["is_upload"]:
             raise HTTPException(400, "Cannot delete pre-configured datasets")

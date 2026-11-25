@@ -33,10 +33,11 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 UPLOAD_RESUME_DAYS = 1
 FAILED_UPLOAD_DAYS = 2
 
-# Tapis users who can see and delete every user's uploaded datasets; everyone
-# else sees and uses only their own. Set here in the code, not in an
-# environment variable, because jobs on Expanse check it too
-# (training/expanse_job.py), and they get only the image.
+# Tapis users who can do with every user's uploaded datasets whatever their
+# uploaders can (see, search, train with, delete); everyone else only with
+# their own. Set here in the code, not in an environment variable, because
+# jobs on Expanse check it too (training/expanse_job.py), and they get only
+# the image.
 ADMIN_USERS = ("sinamps",)
 
 # ── database (Postgres) ──────────────────────────────────────────────────────

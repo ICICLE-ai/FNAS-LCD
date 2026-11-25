@@ -8,9 +8,9 @@ accepts exactly the arguments FNAS-LCD sends and refuses anything else.
   train --dataset UPLOAD_JOB --plainnet_struct S --num_classes N --epochs E
         --batch_size_per_gpu B --workers_per_gpu W --lr_per_256 LR --warmup W
         [--max_iters M]
-      Train one architecture with timm_trainer.py on a dataset the same
-      Tapis user uploaded. The model and metrics go to the job's output
-      folder.
+      Train one architecture with timm_trainer.py on an uploaded dataset,
+      if the same Tapis user uploaded it or is one of the site's admins
+      (web/config.py). The model and metrics go to the job's output folder.
   upload
       Unpack dataset.tar, which Tapis copied into the job's folder, into
       dataset/ there, and record which Tapis user uploaded it.
@@ -34,7 +34,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-# The site's settings, in the same image: its admins may delete any upload.
+# The site's settings, in the same image: its admins may use any upload.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from web.config import ADMIN_USERS  # noqa: E402
 
@@ -68,6 +68,12 @@ def uploader(folder: Path) -> str:
         return (folder / OWNER_FILE).read_text().strip()
     except OSError:
         fail(f"{folder} isn't a finished FNAS-LCD upload")
+
+
+def check_owner(folder: Path, me: str, action: str) -> None:
+    """Refuse unless `me` uploaded the dataset in `folder` or is an admin."""
+    if uploader(folder) != me and me not in ADMIN_USERS:
+        fail(f"{me} didn't upload the dataset in {folder}, so can't {action} it")
 
 
 class _Parser(argparse.ArgumentParser):
@@ -124,9 +130,7 @@ def train(argv: list[str]) -> None:
     data_dir = DATASETS / args.dataset / "dataset"
     if not (data_dir / "train").is_dir():
         fail(f"no dataset with a train/ folder at {data_dir}")
-    owner = job_owner()
-    if uploader(DATASETS / args.dataset) != owner:
-        fail(f"{owner} didn't upload the dataset {args.dataset}, so can't train with it")
+    check_owner(DATASETS / args.dataset, job_owner(), "train with")
     out = WORKSPACE / "output"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -204,8 +208,7 @@ def delete(argv: list[str]) -> None:
         # Already deleted, e.g. by SDSC's cleanup of old files.
         print(f"Nothing to delete: {folder} doesn't exist", flush=True)
         return
-    if uploader(folder) != me and me not in ADMIN_USERS:
-        fail(f"{me} didn't upload the dataset in {folder}, so can't delete it")
+    check_owner(folder, me, "delete")
     shutil.rmtree(folder)
     print(f"Deleted {folder}", flush=True)
 

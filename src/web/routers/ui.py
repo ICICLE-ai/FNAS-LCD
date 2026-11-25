@@ -109,7 +109,7 @@ def datasets_page(request: Request, session: dict = Depends(get_session)):
         ).fetchall()
     user = session.get("tapis_username")
     return templates.TemplateResponse(request, "datasets.html", {
-        "datasets": [_row_to_dataset(r) for r in datasets if dataset_service.can_see(r, user)],
+        "datasets": [_row_to_dataset(r) for r in datasets if dataset_service.can_use(r, user)],
     })
 
 
@@ -123,7 +123,7 @@ def dataset_detail(request: Request, dataset_id: int, session: dict = Depends(ge
     user = session.get("tapis_username")
     with get_db() as conn:
         row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-        if row is None or not dataset_service.can_see(row, user):
+        if row is None or not dataset_service.can_use(row, user):
             raise HTTPException(404, "Dataset not found")
         jobs = conn.execute(
             "SELECT * FROM jobs WHERE dataset_id=%s ORDER BY id DESC LIMIT 20",
@@ -131,7 +131,6 @@ def dataset_detail(request: Request, dataset_id: int, session: dict = Depends(ge
         ).fetchall()
     return templates.TemplateResponse(request, "dataset_detail.html", {
         "dataset": _row_to_dataset(row),
-        "usable": dataset_service.can_use(row, user),
         "jobs": [_row_to_job(j) for j in jobs],
     })
 

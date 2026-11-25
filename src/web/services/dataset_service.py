@@ -648,20 +648,15 @@ def remove_failed_uploads() -> None:
         )
 
 
-# ── who may see and use a dataset ──────────────────────────────────────────
-
-def can_see(row, user: str | None) -> bool:
-    """Whether `user` may see a dataset: built-in datasets are everyone's, and
-    an upload is its uploader's, though settings.admin_users see them all."""
-    return not row["is_upload"] or (user is not None and
-                                    (row["uploaded_by"] == user or user in settings.admin_users))
-
+# ── who may use a dataset ──────────────────────────────────────────────────
 
 def can_use(row, user: str | None) -> bool:
-    """Whether `user` may search and train with a dataset: built-in datasets
-    and their own uploads, admins included. Jobs on Expanse check the same
+    """Whether `user` may see a dataset and search, train with or delete it:
+    built-in datasets are everyone's, and an upload is its uploader's and the
+    admins' (settings.admin_users). Jobs on Expanse check the same
     (training/expanse_job.py)."""
-    return not row["is_upload"] or (user is not None and row["uploaded_by"] == user)
+    return not row["is_upload"] or (user is not None and
+                                    (row["uploaded_by"] == user or user in settings.admin_users))
 
 
 # ── lifetime on Expanse ────────────────────────────────────────────────────
@@ -683,7 +678,7 @@ def is_expired(row) -> bool:
 
 def usable_datasets(conn, user: str | None) -> list:
     """The datasets `user` can search and train with: ready, not expired,
-    and theirs to use (can_use)."""
+    and open to them (can_use)."""
     rows = conn.execute("SELECT * FROM datasets WHERE is_ready=1 ORDER BY id").fetchall()
     return [row for row in rows if not is_expired(row) and can_use(row, user)]
 
@@ -691,7 +686,8 @@ def usable_datasets(conn, user: str | None) -> list:
 def training_problem(row, user: str) -> str | None:
     """Why `user` can't train with a dataset on Expanse right now, or None."""
     if not can_use(row, user):
-        return f"Only the user who uploaded dataset '{row['name']}' can train with it."
+        return (f"Only the user who uploaded dataset '{row['name']}', or an admin, "
+                f"can train with it.")
     if not row["is_ready"]:
         return f"Dataset '{row['name']}' is not ready for training."
     if tapis_service.dataset_job_uuid(row["remote_path"]) is None:
