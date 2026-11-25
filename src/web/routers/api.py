@@ -39,6 +39,17 @@ def _dataset_status(row) -> str:
     return "ready" if row["is_ready"] else "uploading"
 
 
+def _dataset_for_jobs(conn, dataset_id: int, user: str | None):
+    """The dataset a search or job asks for, if `user` may use it."""
+    row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
+    if row is None or not dataset_service.can_see(row, user):
+        raise HTTPException(404, "Dataset not found")
+    if not dataset_service.can_use(row, user):
+        raise HTTPException(403, "Only the user who uploaded this dataset can search or "
+                                 "train with it.")
+    return row
+
+
 def _row_to_dataset(row) -> DatasetResponse:
     return DatasetResponse(
         id=row["id"],
@@ -102,17 +113,19 @@ def list_devices():
 # ── datasets ───────────────────────────────────────────────────────────────
 
 @router.get("/datasets", response_model=DatasetListResponse)
-def list_datasets():
+def list_datasets(session: dict = Depends(get_session)):
+    """The datasets you can search and train with: the built-in ones and
+    your own uploads."""
     with get_db() as conn:
-        rows = dataset_service.usable_datasets(conn)
+        rows = dataset_service.usable_datasets(conn, session.get("tapis_username"))
     return DatasetListResponse(datasets=[_row_to_dataset(r) for r in rows])
 
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetResponse)
-def get_dataset(dataset_id: int):
+def get_dataset(dataset_id: int, session: dict = Depends(get_session)):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-    if row is None:
+    if row is None or not dataset_service.can_see(row, session.get("tapis_username")):
         raise HTTPException(404, "Dataset not found")
     return _row_to_dataset(row)
 
@@ -163,11 +176,12 @@ def upload_dataset(
 
 @router.delete("/datasets/{dataset_id}", response_model=MessageResponse)
 def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
-    """Delete an uploaded dataset. Only its uploader may, and only while no
-    job has used it: jobs keep a reference to their dataset, so deleting it
-    would mean erasing those jobs' records.
+    """Delete an uploaded dataset. Only its uploader may, or an admin
+    (settings.admin_users), and only while no job has used it: jobs keep a
+    reference to their dataset, so deleting it would mean erasing those
+    jobs' records.
 
-    Its copy on Expanse is deleted by a job run with the uploader's own login,
+    Its copy on Expanse is deleted by a job run with the caller's own login,
     which can take a few minutes; the dataset is shown as 'deleting' and
     disappears once that job finishes."""
     username = session.get("tapis_username")
@@ -177,12 +191,10 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
         row = conn.execute(
             "SELECT * FROM datasets WHERE id=%s FOR UPDATE", (dataset_id,)
         ).fetchone()
-        if row is None:
+        if row is None or not dataset_service.can_see(row, username):
             raise HTTPException(404, "Dataset not found")
         if not row["is_upload"]:
             raise HTTPException(400, "Cannot delete pre-configured datasets")
-        if not username or row["uploaded_by"] != username:
-            raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
         busy = {"checking": "checked", "copying": "copied to Expanse",
                 "deleting": "deleted from Expanse"}
         if row["copy_status"] in busy:
@@ -228,15 +240,13 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
 # ── search stub (full impl in Phase 3) ─────────────────────────────────────
 
 @router.post("/search", response_model=SearchResponse)
-def run_search(req: SearchRequest):
+def run_search(req: SearchRequest, session: dict = Depends(get_session)):
     """Run architecture search under a latency/FLOPs budget."""
     from ..services.search_service import run_search as do_search
 
     # Lookup dataset info
     with get_db() as conn:
-        ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (req.dataset_id,)).fetchone()
-        if ds is None:
-            raise HTTPException(404, "Dataset not found")
+        ds = _dataset_for_jobs(conn, req.dataset_id, session.get("tapis_username"))
         dev = conn.execute(
             "SELECT * FROM device_configs WHERE name=%s", (req.device_type,)
         ).fetchone()
@@ -282,9 +292,7 @@ def create_job(req: JobCreateRequest, session: dict = Depends(get_session)):
         )
 
     with get_db() as conn:
-        ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (req.dataset_id,)).fetchone()
-        if ds is None:
-            raise HTTPException(404, "Dataset not found")
+        _dataset_for_jobs(conn, req.dataset_id, submitted_by)
         dev = conn.execute(
             "SELECT * FROM device_configs WHERE name=%s", (req.device_type,)
         ).fetchone()

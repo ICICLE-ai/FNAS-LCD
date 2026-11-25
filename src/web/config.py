@@ -33,6 +33,12 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
 UPLOAD_RESUME_DAYS = 1
 FAILED_UPLOAD_DAYS = 2
 
+# Tapis users who can see and delete every user's uploaded datasets; everyone
+# else sees and uses only their own. Set here in the code, not in an
+# environment variable, because jobs on Expanse check it too
+# (training/expanse_job.py), and they get only the image.
+ADMIN_USERS = ("sinamps",)
+
 # ── database (Postgres) ──────────────────────────────────────────────────────
 # Defaults match the `db` service in docker-compose.yml; override via env
 # vars for bare local dev against a different Postgres instance.
@@ -155,6 +161,7 @@ class AppSettings:
     max_upload_bytes: int = MAX_UPLOAD_BYTES
     upload_resume_days: int = UPLOAD_RESUME_DAYS
     failed_upload_days: int = FAILED_UPLOAD_DAYS
+    admin_users: tuple[str, ...] = ADMIN_USERS
     lookup_csv: Path = field(default_factory=lambda: LOOKUP_CSV)
     model_root: Path = field(default_factory=lambda: MODEL_ROOT)
     repo_root: Path = field(default_factory=lambda: REPO_ROOT)

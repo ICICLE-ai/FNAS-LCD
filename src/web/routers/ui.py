@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from ..config import settings
 from ..database import get_db
 from ..deps import get_session
-from .api import _row_to_dataset, _row_to_job
+from .api import _dataset_for_jobs, _row_to_dataset, _row_to_job
 from ..services import dataset_service
 
 router = APIRouter()
@@ -78,7 +78,7 @@ def index(request: Request, submitted: int | None = Query(None),
           session: dict = Depends(get_session)):
     tapis_username = session.get("tapis_username")
     with get_db() as conn:
-        ds_count = len(dataset_service.usable_datasets(conn))
+        ds_count = len(dataset_service.usable_datasets(conn, tapis_username))
         stats = _job_stats(conn, tapis_username)
         recent = conn.execute(
             "SELECT jobs.*, datasets.name AS dataset_name FROM jobs "
@@ -100,15 +100,16 @@ def index(request: Request, submitted: int | None = Query(None),
 # ── datasets ───────────────────────────────────────────────────────────────
 
 @router.get("/datasets", response_class=HTMLResponse)
-def datasets_page(request: Request):
+def datasets_page(request: Request, session: dict = Depends(get_session)):
     # Unlike the search form, list uploads that aren't ready (yet), with
     # their status, so uploaders can follow them and see failures.
     with get_db() as conn:
         datasets = conn.execute(
             "SELECT * FROM datasets WHERE is_ready=1 OR is_upload=1 ORDER BY id"
         ).fetchall()
+    user = session.get("tapis_username")
     return templates.TemplateResponse(request, "datasets.html", {
-        "datasets": [_row_to_dataset(r) for r in datasets],
+        "datasets": [_row_to_dataset(r) for r in datasets if dataset_service.can_see(r, user)],
     })
 
 
@@ -118,10 +119,11 @@ def dataset_upload_form(request: Request):
 
 
 @router.get("/datasets/{dataset_id}", response_class=HTMLResponse)
-def dataset_detail(request: Request, dataset_id: int):
+def dataset_detail(request: Request, dataset_id: int, session: dict = Depends(get_session)):
+    user = session.get("tapis_username")
     with get_db() as conn:
         row = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
-        if row is None:
+        if row is None or not dataset_service.can_see(row, user):
             raise HTTPException(404, "Dataset not found")
         jobs = conn.execute(
             "SELECT * FROM jobs WHERE dataset_id=%s ORDER BY id DESC LIMIT 20",
@@ -129,6 +131,7 @@ def dataset_detail(request: Request, dataset_id: int):
         ).fetchall()
     return templates.TemplateResponse(request, "dataset_detail.html", {
         "dataset": _row_to_dataset(row),
+        "usable": dataset_service.can_use(row, user),
         "jobs": [_row_to_job(j) for j in jobs],
     })
 
@@ -136,9 +139,9 @@ def dataset_detail(request: Request, dataset_id: int):
 # ── search ─────────────────────────────────────────────────────────────────
 
 @router.get("/search", response_class=HTMLResponse)
-def search_form(request: Request):
+def search_form(request: Request, session: dict = Depends(get_session)):
     with get_db() as conn:
-        datasets = dataset_service.usable_datasets(conn)
+        datasets = dataset_service.usable_datasets(conn, session.get("tapis_username"))
         devices = _get_device_configs(conn)
     return templates.TemplateResponse(request, "search.html", {
         "datasets": [_row_to_dataset(r) for r in datasets],
@@ -160,13 +163,11 @@ def search_run(
     from ..services.job_manager import job_manager
 
     with get_db() as conn:
-        datasets = dataset_service.usable_datasets(conn)
+        datasets = dataset_service.usable_datasets(conn, session.get("tapis_username"))
         devices = _get_device_configs(conn)
-        ds = conn.execute("SELECT * FROM datasets WHERE id=%s", (dataset_id,)).fetchone()
+        _dataset_for_jobs(conn, dataset_id, session.get("tapis_username"))
         dev = conn.execute("SELECT * FROM device_configs WHERE name=%s", (device_type,)).fetchone()
 
-    if ds is None:
-        raise HTTPException(404, "Dataset not found")
     if dev is None:
         raise HTTPException(400, f"Unknown device: {device_type}")
 

@@ -648,6 +648,22 @@ def remove_failed_uploads() -> None:
         )
 
 
+# ── who may see and use a dataset ──────────────────────────────────────────
+
+def can_see(row, user: str | None) -> bool:
+    """Whether `user` may see a dataset: built-in datasets are everyone's, and
+    an upload is its uploader's, though settings.admin_users see them all."""
+    return not row["is_upload"] or (user is not None and
+                                    (row["uploaded_by"] == user or user in settings.admin_users))
+
+
+def can_use(row, user: str | None) -> bool:
+    """Whether `user` may search and train with a dataset: built-in datasets
+    and their own uploads, admins included. Jobs on Expanse check the same
+    (training/expanse_job.py)."""
+    return not row["is_upload"] or (user is not None and row["uploaded_by"] == user)
+
+
 # ── lifetime on Expanse ────────────────────────────────────────────────────
 
 def expires_on(row) -> datetime.date | None:
@@ -665,14 +681,17 @@ def is_expired(row) -> bool:
     return expires is not None and expires <= datetime.date.today()
 
 
-def usable_datasets(conn) -> list:
-    """The datasets offered for search and training: ready, and not expired."""
+def usable_datasets(conn, user: str | None) -> list:
+    """The datasets `user` can search and train with: ready, not expired,
+    and theirs to use (can_use)."""
     rows = conn.execute("SELECT * FROM datasets WHERE is_ready=1 ORDER BY id").fetchall()
-    return [row for row in rows if not is_expired(row)]
+    return [row for row in rows if not is_expired(row) and can_use(row, user)]
 
 
-def training_problem(row) -> str | None:
-    """Why a dataset can't be trained on Expanse right now, or None."""
+def training_problem(row, user: str) -> str | None:
+    """Why `user` can't train with a dataset on Expanse right now, or None."""
+    if not can_use(row, user):
+        return f"Only the user who uploaded dataset '{row['name']}' can train with it."
     if not row["is_ready"]:
         return f"Dataset '{row['name']}' is not ready for training."
     if tapis_service.dataset_job_uuid(row["remote_path"]) is None:

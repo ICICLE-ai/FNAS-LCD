@@ -101,8 +101,10 @@ as training needs; the dataset's page shows the outcome, and failed uploads are 
 after two days. Hidden files and folders (such as macOS's `._*` and `.DS_Store`) and
 `__MACOSX/` are skipped. Scripts can upload in one request instead, with
 `POST /api/datasets/upload`. Uploading requires a Tapis login, the same as submitting a
-job; only the uploader can delete the dataset (`DELETE /api/datasets/{id}`), and only
-while no job has used it.
+job. Only a dataset's uploader sees it and can search and train with it, on the site
+and on Expanse; the admins in `ADMIN_USERS` (`src/web/config.py`) also see every upload.
+The uploader or an admin can delete a dataset (`DELETE /api/datasets/{id}`) while no job
+has used it.
 
 With remote training enabled, an upload is then copied to SDSC Expanse in the
 background (status **copying** on its page) and becomes usable once it is **ready**.

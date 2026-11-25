@@ -79,7 +79,7 @@ Upload it again to keep using it.</div>
 <p class="empty">No jobs yet.</p>
 {% endif %}
 
-{% if dataset.status == "ready" %}
+{% if dataset.status == "ready" and usable %}
 <div class="actions" style="margin-top:20px;">
     <a href="/search?dataset_id={{ dataset.id }}" class="btn btn-primary">Search with this dataset</a>
 </div>

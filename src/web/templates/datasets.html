@@ -27,7 +27,7 @@
         <td>{{ ds.id }}</td>
         <td><a href="/datasets/{{ ds.id }}">{{ ds.name }}</a></td>
         <td>{{ ds.num_classes }}</td>
-        <td>{% if ds.is_upload %}Uploaded{% else %}Built-in{% endif %}</td>
+        <td>{% if ds.is_upload %}Uploaded{% if ds.uploaded_by %} by {{ ds.uploaded_by }}{% endif %}{% else %}Built-in{% endif %}</td>
         <td>{{ status_badge(ds.status) }}</td>
         <td>{{ ds.created_at[:16] if ds.created_at else "" }}</td>
         <td><a href="/datasets/{{ ds.id }}">View</a></td>

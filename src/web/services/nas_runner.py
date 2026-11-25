@@ -221,7 +221,7 @@ def _run_remote_training(job_id: int, job: dict, cancel_event: threading.Event) 
 
     uuid = job.get("tapis_job_uuid")
     if not uuid:
-        problem = dataset_service.training_problem(ds_row)
+        problem = dataset_service.training_problem(ds_row, submitted_by)
         if problem:
             _fail(job_id, problem)
             return None
