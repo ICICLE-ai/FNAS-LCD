@@ -23,8 +23,15 @@ CHECKPOINTS_DIR = STORAGE_DIR / "checkpoints"
 MODELS_DIR = STORAGE_DIR / "models"
 
 # Largest dataset archive accepted, in bytes. Enforced before an upload is
-# written to disk (see main.py), and stated on the upload page.
+# written to disk (see main.py and routers/uploads.py), and stated on the
+# upload page.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+
+# How long an unfinished upload can be continued, and how long a failed one
+# stays listed with its reason before it is removed (see
+# services/resumable_uploads.py). Both are stated on the pages.
+UPLOAD_RESUME_DAYS = 1
+FAILED_UPLOAD_DAYS = 2
 
 # ── database (Postgres) ──────────────────────────────────────────────────────
 # Defaults match the `db` service in docker-compose.yml; override via env
@@ -146,6 +153,8 @@ class AppSettings:
     checkpoints_dir: Path = field(default_factory=lambda: CHECKPOINTS_DIR)
     models_dir: Path = field(default_factory=lambda: MODELS_DIR)
     max_upload_bytes: int = MAX_UPLOAD_BYTES
+    upload_resume_days: int = UPLOAD_RESUME_DAYS
+    failed_upload_days: int = FAILED_UPLOAD_DAYS
     lookup_csv: Path = field(default_factory=lambda: LOOKUP_CSV)
     model_root: Path = field(default_factory=lambda: MODEL_ROOT)
     repo_root: Path = field(default_factory=lambda: REPO_ROOT)

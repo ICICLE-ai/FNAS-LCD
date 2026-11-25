@@ -1,6 +1,7 @@
 {# A dataset's status as a badge, styled like the job status badges. #}
 {% macro status_badge(status) -%}
-{%- set style = {"ready": "completed", "uploading": "pending", "copying": "training",
-                  "deleting": "training", "expired": "cancelled", "failed": "failed"} -%}
+{%- set style = {"ready": "completed", "uploading": "pending", "checking": "training",
+                  "copying": "training", "deleting": "training", "expired": "cancelled",
+                  "failed": "failed"} -%}
 <span class="badge badge-{{ style[status] }}">{{ status }}</span>
 {%- endmacro %}

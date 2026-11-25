@@ -23,7 +23,7 @@ from ..models import (
     SearchRequest,
     SearchResponse,
 )
-from ..services import dataset_service, user_tokens
+from ..services import dataset_service, resumable_uploads, user_tokens
 
 router = APIRouter(prefix="/api")
 
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api")
 
 def _dataset_status(row) -> str:
     """See DatasetResponse.status."""
-    if row.get("copy_status") in ("copying", "deleting", "failed"):
+    if row.get("copy_status") in ("uploading", "checking", "copying", "deleting", "failed"):
         return row["copy_status"]
     if dataset_service.is_expired(row):
         return "expired"
@@ -140,9 +140,9 @@ def upload_dataset(
     if not file.filename:
         raise HTTPException(400, "Filename is required")
 
-    allowed_ext = (".zip", ".tar", ".tar.gz", ".tgz")
-    if not any(file.filename.endswith(ext) for ext in allowed_ext):
-        raise HTTPException(400, f"Unsupported format. Allowed: {', '.join(allowed_ext)}")
+    if not file.filename.endswith(dataset_service.ARCHIVE_TYPES):
+        raise HTTPException(400, f"Unsupported format. Allowed: "
+                                 f"{', '.join(dataset_service.ARCHIVE_TYPES)}")
 
     if file.size is not None and file.size > settings.max_upload_bytes:
         raise HTTPException(413, "File too large: the maximum upload size is "
@@ -183,7 +183,8 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
             raise HTTPException(400, "Cannot delete pre-configured datasets")
         if not username or row["uploaded_by"] != username:
             raise HTTPException(403, "Only the user who uploaded this dataset can delete it.")
-        busy = {"copying": "copied to Expanse", "deleting": "deleted from Expanse"}
+        busy = {"checking": "checked", "copying": "copied to Expanse",
+                "deleting": "deleted from Expanse"}
         if row["copy_status"] in busy:
             raise HTTPException(
                 409, f"This dataset is still being {busy[row['copy_status']]}. "
@@ -214,6 +215,7 @@ def delete_dataset(dataset_id: int, session: dict = Depends(get_session)):
                 "remote_job_uuid=%s WHERE id=%s", (delete_job, dataset_id),
             )
         else:
+            resumable_uploads.cancel(dataset_id)  # if it is still arriving
             dataset_service.delete_local_files(row["id"], row["name"])
             conn.execute("DELETE FROM datasets WHERE id=%s", (dataset_id,))
     if delete_job:

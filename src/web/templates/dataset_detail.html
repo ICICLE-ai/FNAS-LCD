@@ -7,7 +7,19 @@
 
 {% if dataset.status == "failed" %}
 <div class="alert alert-error">{{ dataset.status_detail }}</div>
-{% elif dataset.status in ("uploading", "copying") %}
+{# A failed delete has a copy on Expanse, so it isn't removed by itself. #}
+{% if not dataset.expires_on %}
+<p class="muted">Failed uploads are removed from the list {{ failed_upload_days }} days after
+they fail.</p>
+{% endif %}
+{% elif dataset.status == "uploading" %}
+<p class="muted">This dataset's archive is still being uploaded. An upload that stopped can
+be continued for {{ upload_resume_days }} day{{ "s" if upload_resume_days != 1 }}: choose the
+same file again on the upload page, in the same browser.</p>
+{% elif dataset.status == "checking" %}
+<p class="muted">The archive has arrived and is being checked and unpacked, which can take a
+few minutes for a large dataset; this page updates by itself.</p>
+{% elif dataset.status == "copying" %}
 <p class="muted">This dataset is being copied to SDSC Expanse, which can take a few
 minutes, or longer when Expanse is busy. It can be used for search and training once its
 status is Ready; this page updates by itself.</p>
@@ -73,7 +85,7 @@ Upload it again to keep using it.</div>
 </div>
 {% endif %}
 
-{% if dataset.status in ("uploading", "copying", "deleting") %}
+{% if dataset.status in ("uploading", "checking", "copying", "deleting") %}
 <script>
 // Reload once the status changes (to ready or failed).
 (function poll() {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -20,6 +20,8 @@ _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 templates.env.globals["max_upload_bytes"] = settings.max_upload_bytes
 templates.env.globals["max_upload_label"] = dataset_service.format_size(settings.max_upload_bytes)
+templates.env.globals["upload_resume_days"] = settings.upload_resume_days
+templates.env.globals["failed_upload_days"] = settings.failed_upload_days
 # For the notices about training on Expanse (search, upload and job pages).
 templates.env.globals["tapis_enabled"] = settings.tapis_enabled
 templates.env.globals["max_job_minutes"] = settings.tapis_max_minutes
@@ -113,42 +115,6 @@ def datasets_page(request: Request):
 @router.get("/datasets/upload", response_class=HTMLResponse)
 def dataset_upload_form(request: Request):
     return templates.TemplateResponse(request, "dataset_upload.html")
-
-
-# A plain `def` (not async) so FastAPI runs it in a worker thread: extracting
-# a multi-GB archive would otherwise block every other request meanwhile.
-@router.post("/datasets/upload", response_class=HTMLResponse)
-def dataset_upload_handler(
-    request: Request,
-    name: str = Form(...),
-    file: UploadFile = File(...),
-    session: dict = Depends(get_session),
-):
-    def form_error(message: str):
-        return templates.TemplateResponse(request, "dataset_upload.html", {"error": message})
-
-    # Uploads are attributed, like jobs: only the uploader may delete one.
-    if not session.get("tapis_username"):
-        return form_error("Log in through the ICICLE portal before uploading a dataset.")
-
-    if not file.filename:
-        return form_error("Filename is required")
-
-    allowed = (".zip", ".tar", ".tar.gz", ".tgz")
-    if not any(file.filename.endswith(ext) for ext in allowed):
-        return form_error(f"Unsupported format. Allowed: {', '.join(allowed)}")
-
-    if file.size is not None and file.size > settings.max_upload_bytes:
-        return form_error(f"File too large: the maximum upload size is "
-                          f"{dataset_service.format_size(settings.max_upload_bytes)}.")
-
-    try:
-        info = dataset_service.add_uploaded_dataset(
-            name, file.file, file.filename, uploaded_by=session["tapis_username"])
-    except Exception as e:
-        return form_error(str(e))
-
-    return RedirectResponse(f"/datasets/{info['id']}", status_code=303)
 
 
 @router.get("/datasets/{dataset_id}", response_class=HTMLResponse)

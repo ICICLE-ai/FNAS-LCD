@@ -86,17 +86,23 @@ uv run python -m src.pipeline.auto_nas \
     --epochs 100 \
     --gpu 0
 ```
-Dataset must be in **ImageFolder format**: a directory with a `train/` (and optionally
-`val/`, `test/`) subfolder, one class per subdirectory.
+Dataset must be in **ImageFolder format**: a directory with `train/` and `val/`
+subfolders (and optionally `test/`), one class per subdirectory.
 
 ## Upload your own dataset (web service)
 Go to **Datasets → Upload Dataset**, provide a name and a `.zip`/`.tar`/`.tar.gz`/`.tgz`
-archive in ImageFolder format (max 10 GB). The service checks the archive (no absolute
-paths, `..`, links or special files, and it must fit in the free disk space), extracts
-it, validates the `train/` structure, and detects the class count automatically. macOS
-metadata (`__MACOSX/`, `._*`, `.DS_Store`) is skipped. Uploading requires a Tapis
-login, the same as submitting a job; only the uploader can delete the dataset
-(`DELETE /api/datasets/{id}`), and only while no job has used it.
+archive in ImageFolder format (max 10 GB). The page sends it in pieces with
+[tus-js-client](https://github.com/tus/tus-js-client), so an upload survives dropped
+connections; one that stops can be continued for a day by choosing the same file again
+in the same browser. The service then checks the archive (no absolute paths, `..`, links
+or special files, and it must fit in the free disk space), extracts it, and checks that
+`train/`, `val/` and (if present) `test/` hold the same class folders, each with images,
+as training needs; the dataset's page shows the outcome, and failed uploads are removed
+after two days. Hidden files and folders (such as macOS's `._*` and `.DS_Store`) and
+`__MACOSX/` are skipped. Scripts can upload in one request instead, with
+`POST /api/datasets/upload`. Uploading requires a Tapis login, the same as submitting a
+job; only the uploader can delete the dataset (`DELETE /api/datasets/{id}`), and only
+while no job has used it.
 
 With remote training enabled, an upload is then copied to SDSC Expanse in the
 background (status **copying** on its page) and becomes usable once it is **ready**.

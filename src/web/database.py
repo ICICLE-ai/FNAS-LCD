@@ -121,12 +121,16 @@ _DATASETS_MIGRATION_COLUMNS = {
     # Tapis username of whoever uploaded the dataset; only they may delete it.
     # NULL for pre-configured datasets and for uploads made before this existed.
     "uploaded_by": "TEXT",
-    # Progress of copying an upload to Expanse so it can be trained:
-    # 'copying', 'ready', 'deleting' or 'failed' (reason in copy_error). NULL
-    # for pre-configured datasets, uploads made before this existed, and
-    # uploads when Tapis is disabled.
+    # Progress of an upload: 'uploading' (resumable uploads, see
+    # resumable_uploads.py) and 'checking', then copying it to Expanse so it
+    # can be trained: 'copying', 'ready', 'deleting' or 'failed' (reason in
+    # copy_error). NULL for pre-configured datasets, uploads made before this
+    # existed, and uploads when Tapis is disabled.
     "copy_status": "TEXT",
     "copy_error": "TEXT",
+    # When an upload failed; failed uploads are removed a while after that
+    # (dataset_service.remove_failed_uploads). NULL for a failed delete.
+    "failed_at": "TIMESTAMPTZ",
     # The Tapis job copying the upload to Expanse, or deleting it from there
     # ('deleting'), so a restart can pick it up again.
     "remote_job_uuid": "TEXT",

@@ -20,10 +20,10 @@ class DatasetResponse(BaseModel):
     description: str = ""
     created_at: str = ""
     uploaded_by: Optional[str] = None
-    # "ready", or for an upload still in progress "uploading" / "copying"
-    # (to Expanse), "deleting" while its copy there is being deleted,
-    # "expired" once SDSC has deleted that copy (see expires_on), or "failed"
-    # with the reason in status_detail.
+    # "ready", or for an upload still in progress "uploading", "checking" (its
+    # archive) or "copying" (to Expanse); "deleting" while its copy there is
+    # being deleted, "expired" once SDSC has deleted that copy (see
+    # expires_on), or "failed" with the reason in status_detail.
     status: str = "ready"
     status_detail: Optional[str] = None
     # The day SDSC deletes the upload's copy on Expanse.

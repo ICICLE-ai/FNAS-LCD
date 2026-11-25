@@ -29,10 +29,14 @@ async def lifespan(app: FastAPI):
     from web.config import settings, ensure_storage_dirs
     from web.database import init_db
     from web.services.storage_service import ensure_bucket
+    from web.services import dataset_service, resumable_uploads
 
     ensure_storage_dirs()
     init_db()
     ensure_bucket()
+    # Unfinished uploads didn't survive the restart (see resumable_uploads).
+    dataset_service.forget_interrupted_uploads()
+    resumable_uploads.keep_clean()
     print(f"  Database: {settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}")
     print(f"  Storage:  {settings.storage_dir} (local) + {settings.s3_endpoint_url}/{settings.s3_bucket} (models)")
     if settings.tapis_enabled:
@@ -83,7 +87,8 @@ def health():
 # Starlette writes an uploaded file to a temporary file in full before any
 # route code runs, so a route can only check the size after the disk space is
 # already used. The limit is therefore enforced here, while the body arrives.
-_UPLOAD_PATHS = {"/datasets/upload", "/api/datasets/upload"}
+# (The upload page's resumable uploads are limited in routers/uploads.py.)
+_UPLOAD_PATHS = {"/api/datasets/upload"}
 # Allowance for the multipart framing and the form's other fields.
 _UPLOAD_OVERHEAD_BYTES = 1024 * 1024
 
@@ -160,7 +165,7 @@ from fastapi import Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from web.deps import AuthRequired, require_login
-from web.routers import api, ui
+from web.routers import api, ui, uploads
 
 
 @app.exception_handler(AuthRequired)
@@ -181,6 +186,7 @@ async def _auth_required(request: Request, exc: AuthRequired):
 _gate = [Depends(require_login)]
 app.include_router(ui.router, dependencies=_gate)    # HTML pages (no prefix)
 app.include_router(api.router, dependencies=_gate)   # JSON API (/api prefix)
+app.include_router(uploads.router, dependencies=_gate)  # the upload page's resumable uploads
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
